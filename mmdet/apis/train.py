@@ -1,4 +1,3 @@
-# Copyright (c) OpenMMLab. All rights reserved.
 import random
 import warnings
 
@@ -42,7 +41,7 @@ def train_detector(model,
                    validate=False,
                    timestamp=None,
                    meta=None):
-    logger = get_root_logger(log_level=cfg.log_level)
+    logger = get_root_logger(cfg.log_level)
 
     # prepare data loaders
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
@@ -68,7 +67,8 @@ def train_detector(model,
             # cfg.gpus will be ignored if distributed
             len(cfg.gpu_ids),
             dist=distributed,
-            seed=cfg.seed) for ds in dataset
+            seed=cfg.seed,#delta change
+            indices_file=cfg.indices_file) for ds in dataset
     ]
 
     # put model on gpus
@@ -148,10 +148,7 @@ def train_detector(model,
         eval_cfg = cfg.get('evaluation', {})
         eval_cfg['by_epoch'] = cfg.runner['type'] != 'IterBasedRunner'
         eval_hook = DistEvalHook if distributed else EvalHook
-        # In this PR (https://github.com/open-mmlab/mmcv/pull/1193), the
-        # priority of IterTimerHook has been modified from 'NORMAL' to 'LOW'.
-        runner.register_hook(
-            eval_hook(val_dataloader, **eval_cfg), priority='LOW')
+        runner.register_hook(eval_hook(val_dataloader, **eval_cfg))
 
     # user-defined hooks
     if cfg.get('custom_hooks', None):
