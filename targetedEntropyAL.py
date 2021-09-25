@@ -8,7 +8,6 @@ import submodlib
 
 # Check Pytorch installation
 import torch, torchvision
-from torch._C import device
 import torch.nn as nn
 import torch.nn.functional as F
 print(torch.__version__, torch.cuda.is_available())
@@ -81,7 +80,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  1
+gpu_id =  0
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -105,7 +104,6 @@ cfg_options['model.train_cfg.rpn_proposal.max_per_img'] = proposals_per_img
 cfg_options['model.test_cfg.rpn.max_per_img'] = proposals_per_img
 cfg_options['evaluation.interval'] = eval_interval
 cfg_options['gpu_ids'] = gpu_id
-
 #cfg_options['log_config.interval'] = round(budget / (samples_per_gpu * 5))
 #cfg_options['workflow'] = workflow      # turn mode after how many epochs
 
@@ -229,7 +227,7 @@ if(initialTraining):
 #----------------------- Run Entropy Sampling Loop -------------------------#
 #---------------------------------------------------------------------------#
 
-targeted = False                 # set to TRUE to run Targeted Entropy
+targeted = True                 # set to TRUE to run Targeted Entropy
 if(not(targeted)):
     targeted_uncertainty_cls = None
     strat_dir = os.path.join(work_dir, "entropySampling", str(run))
