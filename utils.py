@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import subprocess
 from collections import defaultdict, Counter
+from tqdm import tqdm
 
 # import mmcv functionalities
 from mmdet.models import build_detector
@@ -161,7 +162,7 @@ def get_uncertainty_scores(model, img_loader, no_of_imgs, imb_classes=None):
   if imb_classes is not None:
     print('using imbalanced classes ', imb_classes)
 
-  for i, data_batch in enumerate(img_loader):     # for each batch
+  for i, data_batch in enumerate(tqdm(img_loader)):     # for each batch
             
       # split the dataloader output into image_data and dataset indices
       img_data, indices = data_batch[0], data_batch[1].numpy()
@@ -253,7 +254,7 @@ def get_unlabelled_RoI_features(model, unlabelled_loader, feature_type):
 #--------- Custom function to extract RoI features from Query set ----------#
 #---------------------------------------------------------------------------#
 
-def get_query_RoI_features(model, query_loader, feature_type):
+def get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type):
 
   device = next(model.parameters()).device  # model device
   query_indices = list()
@@ -302,7 +303,7 @@ def get_query_RoI_features(model, query_loader, feature_type):
       batch_roi_features = batch_roi_features.split(num_gts_per_img, 0)
       
       for j, img_roi_features in enumerate(batch_roi_features):
-        print(indices[j], img_roi_features.shape)
+        #print(indices[j], img_roi_features.shape)
         query_indices.append(indices[j]) # add image index to list
         xf = img_roi_features.detach().cpu().numpy()
         query_features.append(xf)
@@ -338,10 +339,10 @@ def compute_queryImage_kernel(query_dataset_feat, unlabeled_dataset_feat):
     for i in range(len(query_dataset_feat)):
         query_feat = np.expand_dims(query_dataset_feat[i], axis=0)
         query_feat_norm = l2_normalize(query_feat) #l2-normalize the query feature vector along the feature dimension
-        print(query_feat_norm.shape)
-        print(unlabeled_feat_norm.shape)
+        #print(query_feat_norm.shape)
+        #print(unlabeled_feat_norm.shape)
         dotp = np.tensordot(query_feat_norm, unlabeled_feat_norm, axes=([2],[2])) #compute the dot product along the feature dimension, i.e between every GT bbox of rare class in the query image with all proposals from all images in the unlabeled set
-        print(dotp.shape)
+        #print(dotp.shape)
         max_match_queryGt_proposal = np.amax(dotp, axis=(1,3)) #find the gt-proposal pair with highest similarity score for each image
         query_image_sim.append(max_match_queryGt_proposal)
     query_image_sim = np.vstack(tuple(query_image_sim))
@@ -355,7 +356,7 @@ def compute_queryImage_kernel(query_dataset_feat, unlabeled_dataset_feat):
 def compute_imageImage_kernel(unlabeled_dataset_feat, batch_size=10):
     image_image_sim = []
     unlabeled_feat_norm = l2_normalize(unlabeled_dataset_feat[0]) #l2-normalize the unlabeled feature vector along the feature dimension
-    print(unlabeled_feat_norm.shape)
+    #print(unlabeled_feat_norm.shape)
     unlabeled_data_size = unlabeled_feat_norm.shape[0]
     for i in range(math.ceil(unlabeled_data_size/batch_size)): #batch through the unlabeled dataset to compute the similarity matrix
         start_ind = i*batch_size
@@ -364,9 +365,9 @@ def compute_imageImage_kernel(unlabeled_dataset_feat, batch_size=10):
             end_ind = unlabeled_data_size
         unlabeled_feat_batch = unlabeled_feat_norm[start_ind:end_ind,:,:]
         dotp = np.tensordot(unlabeled_feat_batch, unlabeled_feat_norm, axes=([2],[2])) #compute the dot product along the feature dimension, i.e between every proposal in an unlabeled image with all proposals from all images in the unlabeled set
-        print(dotp.shape)
+        #print(dotp.shape)
         max_match_unlabeledProposal_proposal = np.amax(dotp, axis=(1,3)) #find the proposal-proposal pair with highest similarity score for each image
-        print(max_match_unlabeledProposal_proposal.shape)
+        #print(max_match_unlabeledProposal_proposal.shape)
         image_image_sim.append(max_match_unlabeledProposal_proposal)
     image_image_sim = np.vstack(tuple(image_image_sim))
     print(image_image_sim.shape)
