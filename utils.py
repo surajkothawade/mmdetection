@@ -251,6 +251,114 @@ def get_unlabelled_RoI_features(model, unlabelled_loader, feature_type):
   return unlabeled_features, unlabelled_indices
 
 #---------------------------------------------------------------------------#
+#-------------- Custom function to Select Top-K Proposals ------------------#
+#---------------------------------------------------------------------------#
+
+def select_top_k_proposals(fg_cls_scores, fg_classes_with_max_score, fg_classes, proposal_budget):
+  # get the indices in order which sorts the foreground class proposals scores in descending order
+  max_score_order = torch.argsort(fg_cls_scores, descending=True).tolist()
+  
+  selected_prop_indices = list()
+  # loop through until proposal budget is exhausted
+  while proposal_budget:
+    cls_budget, per_cls_budget, next_round_max_score_order =  dict(), (proposal_budget // len(fg_classes)) + 1, list()
+    # assign budget to each foreground class
+    for cls in fg_classes:
+      cls_budget[cls.item()] = per_cls_budget
+    
+    # loop through the ordered list
+    for idx in max_score_order:
+      curr_class = fg_classes_with_max_score[idx].item()
+      if cls_budget[curr_class]: # if budget permits
+        selected_prop_indices.append(idx)   # add index to selection list
+        cls_budget[curr_class] -= 1         # reduce class budget
+        proposal_budget -= 1                # reduce proposal budget
+        if not proposal_budget:             # stop if proposal budget exhausted
+          break
+      else:
+        next_round_max_score_order.append(idx)
+    # limit the order_list to indices not chosen in current iteration
+    max_score_order = next_round_max_score_order
+    
+  return selected_prop_indices
+
+#---------------------------------------------------------------------------#
+#---------------- Custom function to extract RoI features ------------------#
+#---------------- from Unlabelled set with Top-K Proposals -----------------#
+#---------------------------------------------------------------------------#
+def get_unlabelled_top_k_RoI_features(model, unlabelled_loader, proposal_budget, feature_type):
+
+  device = next(model.parameters()).device  # model device
+  unlabelled_indices = list()
+  unlabelled_roi_features = list()
+
+  if(feature_type == "fc"):
+    fc_features = True
+
+  for i, data_batch in enumerate(tqdm(unlabelled_loader)):     # for each batch
+            
+      # split the dataloader output into image_data and dataset indices
+      img_data, indices = data_batch[0], data_batch[1].numpy()
+      
+      imgs, img_metas = img_data['img'].data[0].to(device=device), img_data['img_metas'].data[0]
+      
+      # extract image features from backbone + FPN neck
+      with torch.no_grad():
+          features = model.extract_feat(imgs)
+      
+      # get batch proposals from RPN Head and extract class scores from RoI Head
+      batch_proposals = extract_proposal_features(model, features, img_metas)
+      batch_roi_features = get_RoI_features(model, features, batch_proposals, with_shared_fcs=True)
+      batch_cls_scores = get_RoI_features(model, features, batch_proposals, only_cls_scores=True)
+
+      # normalize class_scores for each image to range between (0,1) which indicates
+      # probability whether an object of that class has a bounding box centered there
+      batch_cls_scores = batch_cls_scores.softmax(-1)
+      
+      # split features and cls_scores
+      num_proposals_per_img = tuple(len(p) for p in batch_proposals)
+      batch_cls_scores = batch_cls_scores.split(num_proposals_per_img, 0)
+      batch_roi_features = batch_roi_features.split(num_proposals_per_img, 0)
+
+      # for each image, select the top-k proposals where k = proposal_budget
+      for j, img_cls_scores in enumerate(batch_cls_scores):
+          img_roi_features = batch_roi_features[j]
+          max_score_per_proposal, max_score_classes = torch.max(img_cls_scores, dim=1) # take max of all class scores per proposal
+          classes, indices, counts = torch.unique(max_score_classes, return_inverse=True, return_counts=True)
+          
+          bg_class_index, bg_count, num_proposals  = len(classes) - 1, counts[-1], len(indices)
+          fg_indices = indices != bg_class_index
+          #print(classes, indices, counts)
+          fg_img_cls_scores = max_score_per_proposal[fg_indices]
+          fg_classes_with_max_score = max_score_classes[fg_indices]
+          fg_img_roi_features = img_roi_features[fg_indices]
+          #print(fg_img_roi_features.shape)
+          
+          if bg_count > num_proposals - proposal_budget: # no. of foreground proposals < proposal_budget
+            #print("augment some background imgs")
+            bg_indices = indices == bg_class_index
+            bg_img_roi_features = img_roi_features[bg_indices][:bg_count - num_proposals + proposal_budget]
+            selected_roi_features = torch.cat((fg_img_roi_features, bg_img_roi_features)).detach().cpu().numpy()
+            del bg_indices, bg_img_roi_features
+          elif bg_count == num_proposals - proposal_budget: # no. of foreground proposals = proposal_budget
+            #print("no need to augment or select")
+            selected_roi_features = fg_img_roi_features.detach().cpu().numpy()
+          else:                                             # no. of foreground proposals > proposal_budget
+            #print("select from foreground imgs")
+            top_k_indices = select_top_k_proposals(fg_img_cls_scores, fg_classes_with_max_score, classes[:-1], proposal_budget)
+            #print(fg_classes_with_max_score[top_k_indices])
+            selected_roi_features = fg_img_roi_features[top_k_indices].detach().cpu().numpy()
+          
+          # append to unlebelled_roi_features list
+          unlabelled_roi_features.append(selected_roi_features)
+          unlabelled_indices.append(indices[j]) # add image index to list
+          # free up gpu_memory
+          del max_score_per_proposal, max_score_classes, classes, indices, counts, bg_class_index, bg_count, num_proposals,fg_indices, fg_img_cls_scores, fg_classes_with_max_score, fg_img_roi_features
+          
+  unlabelled_features = np.stack(unlabelled_roi_features, axis=0)
+  return unlabelled_features, unlabelled_indices
+
+#---------------------------------------------------------------------------#
 #--------- Custom function to extract RoI features from Query set ----------#
 #---------------------------------------------------------------------------#
 
