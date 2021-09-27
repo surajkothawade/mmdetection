@@ -1,7 +1,7 @@
-# import numpy
 import numpy as np
 import os
-import math
+import sys
+import gc
 
 # import submodlib
 import submodlib
@@ -47,11 +47,12 @@ from mmdet.datasets.pipelines import Compose
 #---------------------------------------------------------------------------#
 budget = 200    # set Active Learning Budget
 no_of_rounds=10 # No. of Rounds to run
-max_epochs =150 # maximum no. of epochs to run during training
+max_epochs = 150  # maximum no. of epochs to run during training
 seed = 42       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
 run = 1         # run number
-eval_interval = 2 # after how many epochs validation should run
+eval_interval = 10 #eval after x epochs
+initialTraining = False
 #---------------------------------------------------------------------------#
 #----------------- Faster RCNN specific configuration ----------------------#
 #---------------------------------------------------------------------------#
@@ -79,7 +80,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  0
+gpu_id =  1
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -102,8 +103,7 @@ cfg_options['optimizer.weight_decay'] = optim_weight_decay
 cfg_options['model.train_cfg.rpn_proposal.max_per_img'] = proposals_per_img
 cfg_options['model.test_cfg.rpn.max_per_img'] = proposals_per_img
 cfg_options['evaluation.interval'] = eval_interval
-#cfg_options['log_config.interval'] = round(budget / (samples_per_gpu * 5))
-#cfg_options['workflow'] = workflow      # turn mode after how many epochs
+cfg_options['gpu_ids'] = gpu_id
 
 #---------------------------------------------------------------------------#
 #--------------------------- Update Config file ----------------------------#
@@ -151,82 +151,82 @@ all_classes = set(range(len(trn_dataset.CLASSES)))
 
 # set the seed to retain order from random selection
 np.random.seed(seed)
+if(initialTraining):
+  # initialize array to contain selected indices from all rounds
+  labelled_indices = np.array([])
 
-# initialize array to contain selected indices from all rounds
-labelled_indices = np.array([])
+  # create a random permutation of all training indices
+  unlabelled_indices = np.random.permutation(no_of_trn_samples)
 
-# create a random permutation of all training indices
-unlabelled_indices = np.random.permutation(no_of_trn_samples)
+  print("#", '-'*15, ' Labelled Dataset Statistics ', '-'*15, "#\n")
+  # call custom function to create imbalance & select labelled dataset as per rare & unrare budget
+  labelled_indices, unlabelled_indices = create_custom_dataset(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_train'], split_cfg['per_class_train'], imbalanced_classes, all_classes)
+  print('\n', len(labelled_indices), " labelled images selected!\n")
 
-print("#", '-'*15, ' Labelled Dataset Statistics ', '-'*15, "#\n")
-# call custom function to create imbalance & select labelled dataset as per rare & unrare budget
-labelled_indices, unlabelled_indices = create_custom_dataset(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_train'], split_cfg['per_class_train'], imbalanced_classes, all_classes)
-print('\n', len(labelled_indices), " labelled images selected!\n")
+  print("#", '-'*15, ' Query Dataset Statistics ', '-'*15, "#\n")
+  # call custom function to select query dataset
+  query_indices, unlabelled_indices = create_custom_dataset(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_val'], split_cfg['per_class_val'], imbalanced_classes, set(imbalanced_classes))
+  print('\n', len(query_indices), " query images selected!")
+  print("Query Indices selected: ", query_indices)
 
-print("#", '-'*15, ' Query Dataset Statistics ', '-'*15, "#\n")
-# call custom function to select query dataset
-query_indices, unlabelled_indices = create_custom_dataset(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_val'], split_cfg['per_class_val'], imbalanced_classes, set(imbalanced_classes))
-print('\n', len(query_indices), " query images selected!")
-print("Query Indices selected: ", query_indices)
+  # prepare Validation file from labelled file
+  custom_val_file = prepare_val_file(trn_dataset, labelled_indices)
 
-# prepare Validation file from labelled file
-custom_val_file = prepare_val_file(trn_dataset, labelled_indices)
+  # set log file
+  test_log = open(os.path.join(work_dir,"Round_1_test_mAP.txt"), 'w')
 
-# set log file
-test_log = open(os.path.join(work_dir,"Round_1_test_mAP.txt"), 'w')
+  # save indices in text file for Active Learning
+  np.savetxt(os.path.join(work_dir,"labelledIndices.txt"), labelled_indices, fmt='%i')
+  np.savetxt(os.path.join(work_dir,"queryIndices.txt"), query_indices, fmt='%i')
+  np.savetxt(os.path.join(work_dir,"unlabelledIndices.txt"), unlabelled_indices, fmt='%i')
 
-# save indices in text file for Active Learning
-np.savetxt(os.path.join(work_dir,"labelledIndices.txt"), labelled_indices, fmt='%i')
-np.savetxt(os.path.join(work_dir,"queryIndices.txt"), query_indices, fmt='%i')
-np.savetxt(os.path.join(work_dir,"unlabelledIndices.txt"), unlabelled_indices, fmt='%i')
+  # print current selection stats
+  labelled_stats = get_class_statistics(trn_dataset, labelled_indices)
+  test_log.write("Labelled Dataset Statistics for Round-{}\n".format(str(1)))
+  test_log.write('| ' + 'Class'.ljust(10) + 'No. of objects'.ljust(3) + 'No. of images' + '\n')
+  test_log.write("-"*40 + '\n')
+  for key, val in labelled_stats.items():
+    line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
+    test_log.write(line + '\n')
 
-# print current selection stats
-labelled_stats = get_class_statistics(trn_dataset, labelled_indices)
-test_log.write("Labelled Dataset Statistics for Round-{}\n".format(str(1)))
-test_log.write('| ' + 'Class'.ljust(10) + 'No. of objects'.ljust(3) + 'No. of images' + '\n')
-test_log.write("-"*40 + '\n')
-for key, val in labelled_stats.items():
-  line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
-  test_log.write(line + '\n')
+  #---------------------------------------------------------------------------#
+  #----------------------- Call First Round Training -------------------------#
+  #---------------------------------------------------------------------------#
 
-#---------------------------------------------------------------------------#
-#----------------------- Call First Round Training -------------------------#
-#---------------------------------------------------------------------------#
+  #----- train initial model -----#
+  indicesFile = os.path.join(work_dir,"labelledIndices.txt")
 
-#----- train initial model -----#
-indicesFile = os.path.join(work_dir,"labelledIndices.txt")
+  train_command ='python {} {} --indices {}'.format(train_script, config, indicesFile)
+  print(train_command)
 
-train_command ='python {} {} --indices {}'.format(train_script, config, indicesFile)
-print(train_command)
+  for std_out in execute(train_command.split()):
+    if std_out[0] != '[':
+      print(std_out, end="")
 
-for std_out in execute(train_command.split()):
-  if std_out[0] != '[':
-    print(std_out, end="")
+  #----- rename initial model ----#
+  copy_command = 'mv {} {}'.format(last_epoch_checkpoint, first_round_checkpoint)
+  for std_out in execute(copy_command.split()):
+      print(std_out, end="")
 
-#----- rename initial model ----#
-copy_command = 'mv {} {}'.format(last_epoch_checkpoint, first_round_checkpoint)
-for std_out in execute(copy_command.split()):
-    print(std_out, end="")
+  #----- test initial model ------#
+  test_command ='python {} {} {} --work-dir {} --eval mAP'.format(test_script, config, first_round_checkpoint, work_dir)
+  print(test_command)
 
-#----- test initial model ------#
-test_command ='python {} {} {} --work-dir {} --eval mAP'.format(test_script, config, first_round_checkpoint, work_dir)
-print(test_command)
+  for std_out in execute(test_command.split()):
+    if std_out[0] != '[':
+      print(std_out, end="")
+      test_log.write(std_out)
 
-for std_out in execute(test_command.split()):
-  if std_out[0] != '[':
-    print(std_out, end="")
-    test_log.write(std_out)
-
-test_log.close()
-#------------------------ End of initial training --------------------------#
+  test_log.close()
+  #------------------------ End of initial training --------------------------#
 
 #---------------------------------------------------------------------------#
 #-------------------------------- Run SMI Loop -----------------------------#
 #---------------------------------------------------------------------------#
 
 # set SMI parameters
-smi_function = "fl2mi"
-optimizer = "NaiveGreedy"
+smi_function = sys.argv[1]
+optimizer = "LazyGreedy"
 stopIfZeroGain = False
 stopIfNegativeGain = False
 verbose = False
@@ -293,9 +293,16 @@ for n in range(no_of_rounds-1):
 
     # extract features and compute kernel
     model.eval()
+    print("Extracting features for the unlabeled dataset:")
     unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
+    print("Extracting features for the query dataset:")
     query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
-
+    #Free memory
+    del model
+    del unlb_loader
+    del query_loader
+    gc.collect()
+    
     if(smi_function=="fl1mi" or smi_function=="logdetmi"): # only these smi functions require computing the VxV kernel
         image_image_sim = compute_imageImage_kernel(unlabelled_dataset_feat)
     query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
@@ -349,7 +356,7 @@ for n in range(no_of_rounds-1):
     #----- train current model -----#
     indicesFile = os.path.join(strat_dir,"labelledIndices.txt")
 
-    train_command ='python {} {} --work-dir {} --indices {} --cfg-options'.format(train_script, config, strat_dir, indicesFile)
+    train_command ='python {} {} --work-dir {} --indices {} --gpu-ids {} --cfg-options'.format(train_script, config, strat_dir, indicesFile, gpu_id)
     train_command = train_command.split()
     train_command.append('data.val.ann_file="{}"'.format(custom_val_file))
     print(' '.join(train_command))
