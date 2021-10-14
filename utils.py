@@ -299,7 +299,7 @@ def get_unlabelled_top_k_RoI_features(model, unlabelled_loader, proposal_budget,
   for i, data_batch in enumerate(tqdm(unlabelled_loader)):     # for each batch
             
       # split the dataloader output into image_data and dataset indices
-      img_data, indices = data_batch[0], data_batch[1].numpy()
+      img_data, img_indices = data_batch[0], data_batch[1].numpy()
       
       imgs, img_metas = img_data['img'].data[0].to(device=device), img_data['img_metas'].data[0]
       
@@ -352,7 +352,7 @@ def get_unlabelled_top_k_RoI_features(model, unlabelled_loader, proposal_budget,
           
           # append to unlebelled_roi_features list
           unlabelled_roi_features.append(selected_roi_features)
-          unlabelled_indices.append(indices[j]) # add image index to list
+          unlabelled_indices.append(img_indices[j]) # add image index to list
           # free up gpu_memory
           del max_score_per_proposal, max_score_classes, classes, indices, counts, bg_class_index, bg_count, num_proposals,fg_indices, fg_img_cls_scores, fg_classes_with_max_score, fg_img_roi_features
           
@@ -439,12 +439,33 @@ def prepare_val_file(trn_dataset, indices, filename_07='trainval_07.txt', filena
   return [trnval_07_file.name, trnval_12_file.name]
 
 #---------------------------------------------------------------------------#
+#----------- Custom function for Query-Query kernel computation ------------#
+#---------------------------------------------------------------------------#
+
+def compute_queryQuery_kernel(query_dataset_feat):
+    query_query_sim = []
+    for i in range(len(query_dataset_feat)):
+        query_row_sim = []
+        for j in range(len(query_dataset_feat)):
+            query_feat_i = query_dataset_feat[i] #(num_proposals, num_features)
+            query_feat_j = query_dataset_feat[j]
+            query_feat_i = l2_normalize(query_feat_i) 
+            query_feat_j = l2_normalize(query_feat_j)
+            dotp = np.tensordot(query_feat_i, query_feat_j, axes=([1],[1])) #compute the dot product along the feature dimension, i.e between every GT bbox of rare class in the query image
+            max_match_queryGt_queryGt = np.amax(dotp, axis=(0,1)) #get the max from (num_proposals in query i, num_proposals in query j)
+            query_row_sim.append(max_match_queryGt_queryGt)
+        query_query_sim.append(query_row_sim)
+    query_query_sim = np.array(query_query_sim)
+    print("final query image kernel shape: ", query_query_sim.shape)
+    return query_query_sim
+
+#---------------------------------------------------------------------------#
 #----------- Custom function for Query-Image kernel computation ------------#
 #---------------------------------------------------------------------------#
 
 def compute_queryImage_kernel(query_dataset_feat, unlabeled_dataset_feat):
     query_image_sim = []
-    unlabeled_feat_norm = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension
+    unlabeled_feat_norm = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension (batch_size, num_proposals, num_features)
     for i in range(len(query_dataset_feat)):
         query_feat = np.expand_dims(query_dataset_feat[i], axis=0)
         query_feat_norm = l2_normalize(query_feat) #l2-normalize the query feature vector along the feature dimension
@@ -462,9 +483,9 @@ def compute_queryImage_kernel(query_dataset_feat, unlabeled_dataset_feat):
 #---------- Custom function for Image-Image kernel computation -------------#
 #---------------------------------------------------------------------------#
 
-def compute_imageImage_kernel(unlabeled_dataset_feat, batch_size=10):
+def compute_imageImage_kernel(unlabeled_dataset_feat, batch_size=100):
     image_image_sim = []
-    unlabeled_feat_norm = l2_normalize(unlabeled_dataset_feat[0]) #l2-normalize the unlabeled feature vector along the feature dimension
+    unlabeled_feat_norm = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension
     #print(unlabeled_feat_norm.shape)
     unlabeled_data_size = unlabeled_feat_norm.shape[0]
     for i in range(math.ceil(unlabeled_data_size/batch_size)): #batch through the unlabeled dataset to compute the similarity matrix

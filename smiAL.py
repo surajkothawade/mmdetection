@@ -80,7 +80,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  1
+gpu_id =  sys.argv[2]
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -226,7 +226,10 @@ if(initialTraining):
 
 # set SMI parameters
 smi_function = sys.argv[1]
-optimizer = "LazyGreedy"
+if(smi_function == "logdetmi"):
+  optimizer = "NaiveGreedy"
+else:
+  optimizer = "LazyGreedy"
 stopIfZeroGain = False
 stopIfNegativeGain = False
 verbose = False
@@ -294,7 +297,13 @@ for n in range(no_of_rounds-1):
     # extract features and compute kernel
     model.eval()
     print("Extracting features for the unlabeled dataset:")
-    unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
+    if(smi_function=="fl1mi" or smi_function=="logdetmi"):
+        proposal_budget = 10
+        unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_top_k_RoI_features(model, unlb_loader, proposal_budget, feature_type="fc")
+        # print("unlabelled_dataset_feat.shape: ", unlabelled_dataset_feat.shape)
+        # print("unlabelled indices: ", unlabelled_indices)
+    else:
+        unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
     print("Extracting features for the query dataset:")
     query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
     #Free memory
@@ -305,6 +314,8 @@ for n in range(no_of_rounds-1):
     
     if(smi_function=="fl1mi" or smi_function=="logdetmi"): # only these smi functions require computing the VxV kernel
         image_image_sim = compute_imageImage_kernel(unlabelled_dataset_feat)
+        if(smi_function=="logdetmi"):
+          query_query_sim = compute_queryQuery_kernel(query_dataset_feat)
     query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
 
     # instantiate the submodular functions using the kernels
@@ -318,16 +329,36 @@ for n in range(no_of_rounds-1):
                                                               num_queries=query_image_sim.shape[0], 
                                                               query_sijs=query_image_sim.T)
 
+    if(smi_function =='fl1mi'):
+        obj = submodlib.FacilityLocationMutualInformationFunction(n=query_image_sim.shape[1],
+                                                                      num_queries=query_image_sim.shape[0], 
+                                                                      data_sijs=image_image_sim, 
+                                                                      query_sijs=query_image_sim.T, 
+                                                                      magnificationEta=1)
+
+    if(smi_function =='logdetmi'):
+        obj = submodlib.LogDeterminantMutualInformationFunction(n=query_image_sim.shape[1],
+                                                                    num_queries=query_image_sim.shape[0],
+                                                                    data_sijs=image_image_sim,  
+                                                                    query_sijs=query_image_sim.T,
+                                                                    query_query_sijs=query_query_sim,
+                                                                    magnificationEta=1,
+                                                                    lambdaVal=1)
+
     greedyList = obj.maximize(budget=budget,optimizer=optimizer, stopIfZeroGain=stopIfZeroGain, 
                               stopIfNegativeGain=stopIfNegativeGain, verbose=verbose)
-    #print(greedyList)
+    # print("greedyList: ", greedyList)
     greedyIndices = [x[0] for x in greedyList]
     greedyIndices = np.array(greedyIndices)
-    print("size of greedy set: ", len(greedyIndices))
+    # print("greedyIndices: ", greedyIndices)
+    # print("size of greedy set: ", len(greedyIndices))
     selected_indices = np.array(unlabelled_indices)[greedyIndices]
+    # print("selected_indices: ", selected_indices)
 
     labelled_indices = np.concatenate([labelled_indices, selected_indices])
     unlabelled_indices = np.setdiff1d(unlabelled_indices, selected_indices)
+    # print("labeled indices: ", labelled_indices)
+    # print("unlabeled indices after setdiff: ", unlabelled_indices)
 
     # augment rare objects from selected data samples into query set 
     augmented_query_indices, _ = create_custom_dataset(trn_dataset, selected_indices, len(selected_indices) * 1000, 0, imbalanced_classes, set(imbalanced_classes))
