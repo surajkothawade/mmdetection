@@ -5,6 +5,7 @@ import torch, torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 import subprocess
+import json
 from collections import defaultdict, Counter
 from tqdm import tqdm
 import math
@@ -436,7 +437,12 @@ def prepare_val_file(trn_dataset, indices, filename_07='trainval_07.txt', filena
       trnval_12_file.write(img_name + '\n')
   trnval_07_file.close()
   trnval_12_file.close()
-  return [trnval_07_file.name, trnval_12_file.name]
+  if os.path.getsize(trnval_07_file.name) and os.path.getsize(trnval_12_file.name):
+    return [trnval_07_file.name, trnval_12_file.name]
+  elif os.path.getsize(trnval_07_file.name):
+    return trnval_07_file.name
+  else:
+    return trnval_12_file.name
 
 #---------------------------------------------------------------------------#
 #----------- Custom function for Query-Query kernel computation ------------#
@@ -599,3 +605,85 @@ def execute(cmd):
     return_code = popen.wait()
     if return_code:
         raise subprocess.CalledProcessError(return_code, cmd)
+#---------------------------------------------------------------------------#
+#-------- Custom function to create Class Imbalance for BDD dataset --------#
+#---------------------------------------------------------------------------#
+def create_custom_dataset_bdd(fullSet, all_indices, rare_class_budget, unrare_class_budget, imbalanced_classes, all_classes, attr_details, img_attribute_dict):
+
+  labelled_budget = {}
+  labelled_indices, unlabelled_indices = list(), list()
+  exhausted_rare_classes = set()
+  attr_class, attr_property, attr_value, attr_budget = attr_details
+
+  # initialize budget for rare and unrare class from the split_config file
+  for i in range(len(fullSet.CLASSES)):
+    if i in imbalanced_classes:
+      labelled_budget[i] = rare_class_budget
+    else:
+      labelled_budget[i] = unrare_class_budget
+  
+  # iterate through whole dataset to select images class wise
+  for k,i in enumerate(all_indices):
+    img_data, index = fullSet[i]
+    gt_labels = img_data['gt_labels'].data.numpy()
+    #break
+    # skip image if it does not contain classes with budget left
+    img_name = img_data['img_metas'].data['filename'].split('/')[-1]
+    img_attr = img_attribute_dict[img_name][attr_property]
+    if attr_class in gt_labels and img_attr == attr_value:
+      if attr_budget > 0:
+        # print("attr budget = ", attr_budget)
+        labelled_indices.append(index)
+        attr_budget -= sum(gt_labels == attr_class)
+      continue
+    if exhausted_rare_classes & set(gt_labels) or not (all_classes & set(gt_labels)):
+      continue
+    
+    # else add image to the labelled pool and decrease budget class wise
+    for label, no_of_objects in Counter(gt_labels).items():
+        labelled_budget[label] -= no_of_objects # decrease budget
+
+        if label in all_classes and labelled_budget[label] <= 0: # budget exhausted
+          # print(fullSet.CLASSES[label]," class exhausted...")
+          all_classes.remove(label)
+          if label in imbalanced_classes:     # if rare class
+            # print("added to rare class list")
+            exhausted_rare_classes.add(label) # add to exhausted list of rare_classes
+    
+    labelled_indices.append(index)  # add image to labelled pool
+    if not len(all_classes):        # if budget exceeded for all the classes, stop & return dataset
+      #print("\nall class budget exhausted...")
+      break
+  
+  # remove labelled indices from the full list
+  labelled_indices = np.asarray(labelled_indices)
+  unlabelled_indices = np.setdiff1d(all_indices, labelled_indices)
+
+  # print dataset statistics
+  stats = get_class_statistics(fullSet, labelled_indices)
+  
+  return labelled_indices, unlabelled_indices
+
+#---------------------------------------------------------------------------#
+#---- Custom function to extract image wise attributes for BDD dataset -----#
+#---------------------------------------------------------------------------#
+def get_image_wise_attributes(json_file):
+  # read det_train json file for image-attribute mapping
+  rd_fl = open(json_file, 'r')
+  str_data = rd_fl.read()
+  image_data = json.loads(str_data)
+
+  attribute_dict = {'weather': {'rainy': 0, 'snowy':0, 'clear':0, 'overcast':0, 'undefined':0, 'partly cloudy':0, 'foggy':0}, \
+                    'scene': {'tunnel':0, 'residential':0, 'parking lot':0, 'undefined':0, 'city street':0, 'gas stations':0, 'highway':0}, \
+                    'timeofday': {'daytime':0, 'night':0, 'dawn/dusk':0, 'undefined':0}}
+  img_attribute_dict = {}
+  img_names = list()
+  for k,item in enumerate(image_data):
+    w, d, s = item['attributes']['weather'], item['attributes']['timeofday'], item['attributes']['scene']
+    attribute_dict['weather'][w] += 1
+    attribute_dict['timeofday'][d] += 1
+    attribute_dict['scene'][s] += 1
+    img_attribute_dict[item['name']] = {'weather': item['attributes']['weather'], \
+                                        'timeofday': item['attributes']['timeofday'], \
+                                        'scene': item['attributes']['scene']}
+  return attribute_dict, img_attribute_dict
