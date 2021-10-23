@@ -80,7 +80,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  1
+gpu_id =  0
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -97,7 +97,7 @@ cfg_options['data.train.times'] = trn_times
 cfg_options['data.samples_per_gpu'] = samples_per_gpu
 cfg_options['data.val.ann_file'] = ['trainval_07.txt', 'trainval_12.txt']
 cfg_options['data.val.img_prefix'] = copy.deepcopy(cfg.data.train.dataset.img_prefix)
-cfg_options['checkpoint_config.interval'] = max_epochs
+cfg_options['checkpoint_config.interval'] = 10
 cfg_options['optimizer.lr'] = optim_lr
 cfg_options['optimizer.weight_decay'] = optim_weight_decay
 cfg_options['model.train_cfg.rpn_proposal.max_per_img'] = proposals_per_img

@@ -1,7 +1,7 @@
 _base_ = [
-    '/content/mmdetection/configs/_base_/models/faster_rcnn_r50_fpn.py',
-    '/content/mmdetection/configs/_base_/datasets/voc0712.py',
-    '/content/mmdetection/configs/_base_/default_runtime.py'
+    '../_base_/models/faster_rcnn_r50_fpn.py',
+    '../_base_/datasets/voc0712.py',
+    '../_base_/default_runtime.py'
 ]
 model = dict(roi_head=dict(bbox_head=dict(num_classes=10)))
 
@@ -10,7 +10,7 @@ CLASSES = ('pedestrian', 'rider', 'car', 'truck', 'bus',
 
 # dataset settings
 dataset_type = 'VOCDataset'
-data_root = 'data/bdd100k/'
+data_root = './data/bdd100k/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
@@ -46,20 +46,20 @@ data = dict(
         times=1,
         dataset=dict(
             type=dataset_type,
-            ann_file='data/bdd100k/VOC2007/ImageSets/Main/train.txt',
-            img_prefix='data/bdd100k/VOC2007/',
+            ann_file='./data/bdd100k/VOC2007/ImageSets/Main/train.txt',
+            img_prefix='./data/bdd100k/VOC2007/',
             pipeline=train_pipeline,
             classes=CLASSES)),
     val=dict(
         type=dataset_type,
-        ann_file='data/bdd100k/VOC2012/ImageSets/Main/val.txt',
-        img_prefix='data/bdd100k/VOC2007/',
+        ann_file='./data/bdd100k/VOC2012/ImageSets/Main/val.txt',
+        img_prefix='./data/bdd100k/VOC2007/',
         pipeline=test_pipeline,
         classes=CLASSES),
     test=dict(
         type=dataset_type,
-        ann_file='data/bdd100k/VOC2012/ImageSets/Main/val.txt',
-        img_prefix='data/bdd100k/VOC2012/',
+        ann_file='./data/bdd100k/VOC2012/ImageSets/Main/val.txt',
+        img_prefix='./data/bdd100k/VOC2012/',
         pipeline=test_pipeline,
         classes=CLASSES))
 evaluation = dict(interval=1, metric='mAP')
