@@ -45,14 +45,14 @@ from mmdet.datasets.pipelines import Compose
 #---------------------------------------------------------------------------#
 #------------------ initialize training parameters -------------------------#
 #---------------------------------------------------------------------------#
-budget = 50    # set Active Learning Budget
-no_of_rounds=10 # No. of Rounds to run
+budget = 200    # set Active Learning Budget
+no_of_rounds = 10 # No. of Rounds to run
 max_epochs = 150 # maximum no. of epochs to run during training
 seed = 42       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
 run = 1         # run number
 eval_interval = 10 #eval after x epochs
-initialTraining = True
+initialTraining = False
 #---------------------------------------------------------------------------#
 #----------------- Faster RCNN specific configuration ----------------------#
 #---------------------------------------------------------------------------#
@@ -243,6 +243,11 @@ if(initialTraining):
 #---------------------------------------------------------------------------#
 #------------------------ Run Random Sampling Loop -------------------------#
 #---------------------------------------------------------------------------#
+if(not(initialTraining)):
+  # get image wise attribute mapping
+  attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
+
+  all_class_set = set(range(len(trn_dataset.CLASSES)))
 
 # create a subdirectory to store log files & data
 strat_dir = os.path.join(work_dir, "randomSampling", str(run))
