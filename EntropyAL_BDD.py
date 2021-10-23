@@ -81,7 +81,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  1
+gpu_id =  0
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -98,7 +98,7 @@ cfg_options['data.train.times'] = trn_times
 cfg_options['data.samples_per_gpu'] = samples_per_gpu
 cfg_options['data.val.ann_file'] = ['trainval_07.txt', 'trainval_12.txt']
 cfg_options['data.val.img_prefix'] = copy.deepcopy(cfg.data.train.dataset.img_prefix)
-cfg_options['checkpoint_config.interval'] = max_epochs
+cfg_options['checkpoint_config.interval'] = eval_interval
 cfg_options['optimizer.lr'] = optim_lr
 cfg_options['optimizer.weight_decay'] = optim_weight_decay
 cfg_options['model.train_cfg.rpn_proposal.max_per_img'] = proposals_per_img
@@ -152,6 +152,9 @@ print('No of training samples and budget: ', no_of_trn_samples, budget)
 
 all_classes = set(range(len(trn_dataset.CLASSES)))
 
+# get image wise attribute mapping
+attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
+
 #---------------------------------------------------------------------------#
 #---- Create Imbalanced Labelled set and Query set from training dataset ---#
 #---------------------------------------------------------------------------#
@@ -166,15 +169,15 @@ if(initialTraining):
   # create a random permutation of all training indices
   unlabelled_indices = np.random.permutation(no_of_trn_samples)
 
-  # get image wise attribute mapping
-  attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
-
   all_class_set = set(range(len(trn_dataset.CLASSES)))
   
   print("#", '-'*15, ' Labelled Dataset Statistics ', '-'*15, "#\n")
   # call custom function to create imbalance & select labelled dataset as per rare & unrare budget
   labelled_indices, unlabelled_indices = create_custom_dataset_bdd(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_train'], split_cfg['per_class_train'], imbalanced_classes, all_class_set, attr_details, img_attribute_dict)
   print('\n', len(labelled_indices), " labelled images selected!\n")
+
+  rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
+  print("No. of rare objects selected: ", no_of_rare_indices)
 
   # print("#", '-'*15, ' Query Dataset Statistics ', '-'*15, "#\n")
   # # call custom function to select query dataset
@@ -202,6 +205,7 @@ if(initialTraining):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
+  test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
 
   #---------------------------------------------------------------------------#
   #----------------------- Call First Round Training -------------------------#
@@ -240,7 +244,6 @@ if(initialTraining):
 #---------------------------------------------------------------------------#
 #----------------------- Run Entropy Sampling Loop -------------------------#
 #---------------------------------------------------------------------------#
-
 targeted = False                 # set to TRUE to run Targeted Entropy
 if(not(targeted)):
     targeted_uncertainty_cls = None
@@ -254,7 +257,8 @@ if(not(os.path.exists(strat_dir))):
     os.makedirs(strat_dir)
     
 # copy labelled, unlabelled indices file from first round backup file. Only these indices are changed in AL rounds
-for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
+#for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
+for file in ("labelledIndices.txt", "unlabelledIndices.txt"):
   src_file = os.path.join(work_dir, file)
   dst_file = os.path.join(strat_dir, file)
   copy_command = 'cp {} {}'.format(src_file, dst_file)
@@ -264,15 +268,18 @@ for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt")
 # set checkpoint and log file name
 last_epoch_checkpoint = strat_dir + '/epoch_' + str(max_epochs) + '.pth'
 if targeted:
-  test_log = open(os.path.join(strat_dir,"Targeted_Entropy_test_mAP.txt"), 'w')
+  test_log_file = os.path.join(strat_dir,"Targeted_Entropy_test_mAP.txt")
 else:
-  test_log = open(os.path.join(strat_dir,"Entropy_test_mAP.txt"), 'w')
+  test_log_file = os.path.join(strat_dir,"Entropy_test_mAP.txt")
 
 # set the indices file name
 cfg.indices_file = strat_dir + "/unlabelledIndices.txt"
 
 #------------ start training for fixed no. of rounds --------------#
 for n in range(no_of_rounds-1):
+  # open log file at the beginning of each round
+  test_log = open(test_log_file, 'a')
+
   print("\n","="*20," beginning of round ",n+2," ","="*20,"\n")
   
   # instantiate the trained model
@@ -312,6 +319,9 @@ for n in range(no_of_rounds-1):
   np.savetxt(strat_dir + "/labelledIndices.txt", labelled_indices, fmt='%i')
   np.savetxt(strat_dir + "/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
 
+  rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
+  print("No. of rare objects selected: ", no_of_rare_indices)
+
   # print current selection stats
   labelled_stats = get_class_statistics(trn_dataset, labelled_indices)
   test_log.write("Labelled Dataset Statistics for Round-{}\n".format(str(n+2)))
@@ -320,6 +330,7 @@ for n in range(no_of_rounds-1):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
+  test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
   
   # prepare Validation file from labelled file
   custom_val_file = prepare_val_file(trn_dataset, labelled_indices, strat_dir=strat_dir)
@@ -350,6 +361,7 @@ for n in range(no_of_rounds-1):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
-  
+
+  # close log file at the end of each round
+  test_log.close()
   #--------------------------- End of current round -----------------------------#
-test_log.close()
