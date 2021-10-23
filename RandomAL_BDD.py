@@ -8,6 +8,7 @@ import submodlib
 
 # Check Pytorch installation
 import torch, torchvision
+from torch._C import device
 import torch.nn as nn
 import torch.nn.functional as F
 print(torch.__version__, torch.cuda.is_available())
@@ -97,7 +98,7 @@ cfg_options['data.train.times'] = trn_times
 cfg_options['data.samples_per_gpu'] = samples_per_gpu
 cfg_options['data.val.ann_file'] = ['trainval_07.txt', 'trainval_12.txt']
 cfg_options['data.val.img_prefix'] = copy.deepcopy(cfg.data.train.dataset.img_prefix)
-cfg_options['checkpoint_config.interval'] = 10
+cfg_options['checkpoint_config.interval'] = eval_interval
 cfg_options['optimizer.lr'] = optim_lr
 cfg_options['optimizer.weight_decay'] = optim_weight_decay
 cfg_options['model.train_cfg.rpn_proposal.max_per_img'] = proposals_per_img
@@ -151,6 +152,9 @@ print('No of training samples and budget: ', no_of_trn_samples, budget)
 
 all_classes = set(range(len(trn_dataset.CLASSES)))
 
+# get image wise attribute mapping
+attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
+
 #---------------------------------------------------------------------------#
 #---- Create Imbalanced Labelled set and Query set from training dataset ---#
 #---------------------------------------------------------------------------#
@@ -165,9 +169,6 @@ if(initialTraining):
   # create a random permutation of all training indices
   unlabelled_indices = np.random.permutation(no_of_trn_samples)
 
-  # get image wise attribute mapping
-  attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
-
   all_class_set = set(range(len(trn_dataset.CLASSES)))
   
   print("#", '-'*15, ' Labelled Dataset Statistics ', '-'*15, "#\n")
@@ -176,8 +177,7 @@ if(initialTraining):
   print('\n', len(labelled_indices), " labelled images selected!\n")
 
   rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
-  print("No. of rare objects selected: ", no_of_rare_indices)
-  
+  print("No. of rare objects selected: ", no_of_rare_indices)  
 
   # print("#", '-'*15, ' Query Dataset Statistics ', '-'*15, "#\n")
   # # call custom function to select query dataset
@@ -206,6 +206,7 @@ if(initialTraining):
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
   test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
+
   #---------------------------------------------------------------------------#
   #----------------------- Call First Round Training -------------------------#
   #---------------------------------------------------------------------------#
@@ -286,7 +287,7 @@ for n in range(no_of_rounds - 1):
 
   rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
   print("No. of rare objects selected: ", no_of_rare_indices)
-  
+
   # save the current list of labelled indices to the indices textfile
   np.savetxt(strat_dir+"/labelledIndices.txt", labelled_indices, fmt='%i')
   np.savetxt(strat_dir+"/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
