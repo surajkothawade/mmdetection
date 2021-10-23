@@ -8,6 +8,7 @@ import submodlib
 
 # Check Pytorch installation
 import torch, torchvision
+from torch._C import device
 import torch.nn as nn
 import torch.nn.functional as F
 print(torch.__version__, torch.cuda.is_available())
@@ -45,14 +46,14 @@ from mmdet.datasets.pipelines import Compose
 #---------------------------------------------------------------------------#
 #------------------ initialize training parameters -------------------------#
 #---------------------------------------------------------------------------#
-budget = 50    # set Active Learning Budget
+budget = 200    # set Active Learning Budget
 no_of_rounds=10 # No. of Rounds to run
-max_epochs = 150 # maximum no. of epochs to run during training
+max_epochs = 150  # maximum no. of epochs to run during training
 seed = 42       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
 run = 1         # run number
 eval_interval = 10 #eval after x epochs
-initialTraining = True
+initialTraining = False
 #---------------------------------------------------------------------------#
 #----------------- Faster RCNN specific configuration ----------------------#
 #---------------------------------------------------------------------------#
@@ -80,7 +81,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  0
+gpu_id =  1
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -97,7 +98,7 @@ cfg_options['data.train.times'] = trn_times
 cfg_options['data.samples_per_gpu'] = samples_per_gpu
 cfg_options['data.val.ann_file'] = ['trainval_07.txt', 'trainval_12.txt']
 cfg_options['data.val.img_prefix'] = copy.deepcopy(cfg.data.train.dataset.img_prefix)
-cfg_options['checkpoint_config.interval'] = 10
+cfg_options['checkpoint_config.interval'] = max_epochs
 cfg_options['optimizer.lr'] = optim_lr
 cfg_options['optimizer.weight_decay'] = optim_weight_decay
 cfg_options['model.train_cfg.rpn_proposal.max_per_img'] = proposals_per_img
@@ -175,10 +176,6 @@ if(initialTraining):
   labelled_indices, unlabelled_indices = create_custom_dataset_bdd(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_train'], split_cfg['per_class_train'], imbalanced_classes, all_class_set, attr_details, img_attribute_dict)
   print('\n', len(labelled_indices), " labelled images selected!\n")
 
-  rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
-  print("No. of rare objects selected: ", no_of_rare_indices)
-  
-
   # print("#", '-'*15, ' Query Dataset Statistics ', '-'*15, "#\n")
   # # call custom function to select query dataset
   # query_indices, unlabelled_indices = create_custom_dataset(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_val'], split_cfg['per_class_val'], imbalanced_classes, set(imbalanced_classes))
@@ -205,7 +202,7 @@ if(initialTraining):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
-  test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
+
   #---------------------------------------------------------------------------#
   #----------------------- Call First Round Training -------------------------#
   #---------------------------------------------------------------------------#
@@ -241,17 +238,23 @@ if(initialTraining):
 
 
 #---------------------------------------------------------------------------#
-#------------------------ Run Random Sampling Loop -------------------------#
+#----------------------- Run Entropy Sampling Loop -------------------------#
 #---------------------------------------------------------------------------#
 
-# create a subdirectory to store log files & data
-strat_dir = os.path.join(work_dir, "randomSampling", str(run))
+targeted = False                 # set to TRUE to run Targeted Entropy
+if(not(targeted)):
+    targeted_uncertainty_cls = None
+    strat_dir = os.path.join(work_dir, "entropySampling", str(run))
+else:
+    targeted_uncertainty_cls = imbalanced_classes
+    strat_dir = os.path.join(work_dir, "targetedEntropySampling", str(run))
+    
+# create a subdirectory to store log files and data
 if(not(os.path.exists(strat_dir))):
     os.makedirs(strat_dir)
-
+    
 # copy labelled, unlabelled indices file from first round backup file. Only these indices are changed in AL rounds
-# for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
-for file in ("labelledIndices.txt", "unlabelledIndices.txt"):
+for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
   src_file = os.path.join(work_dir, file)
   dst_file = os.path.join(strat_dir, file)
   copy_command = 'cp {} {}'.format(src_file, dst_file)
@@ -260,32 +263,55 @@ for file in ("labelledIndices.txt", "unlabelledIndices.txt"):
 
 # set checkpoint and log file name
 last_epoch_checkpoint = strat_dir + '/epoch_' + str(max_epochs) + '.pth'
-test_log_file = os.path.join(strat_dir,"Random_test_mAP.txt")
+if targeted:
+  test_log = open(os.path.join(strat_dir,"Targeted_Entropy_test_mAP.txt"), 'w')
+else:
+  test_log = open(os.path.join(strat_dir,"Entropy_test_mAP.txt"), 'w')
 
-# load from labelled, unlabelled indices fies
-labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
-unlabelled_indices = np.loadtxt(strat_dir+"/unlabelledIndices.txt",dtype=int)
+# set the indices file name
+cfg.indices_file = strat_dir + "/unlabelledIndices.txt"
 
-#------------ start training --------------#
-for n in range(no_of_rounds - 1):
-  # open log file at the beginning of each round
-  test_log = open(test_log_file, 'a')
-  
+#------------ start training for fixed no. of rounds --------------#
+for n in range(no_of_rounds-1):
   print("\n","="*20," beginning of round ",n+2," ","="*20,"\n")
-  # select training indices equal to budget
-  selected_indices = unlabelled_indices[:budget]
-
-  # remove selected indices from the unlabelled indices set & add them to the list of labelled indices
-  unlabelled_indices = unlabelled_indices[budget:]
-  labelled_indices = np.concatenate([labelled_indices,selected_indices])
-
-  rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
-  print("No. of rare objects selected: ", no_of_rare_indices)
   
-  # save the current list of labelled indices to the indices textfile
-  np.savetxt(strat_dir+"/labelledIndices.txt", labelled_indices, fmt='%i')
-  np.savetxt(strat_dir+"/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
+  # instantiate the trained model
+  if n:
+    model = init_detector(config, checkpoint, device='cuda:'+str(gpu_id))
+  else:     # for second round, use first round model trained with random indices
+    print("second round uses first round model trained with random indices...")
+    model = init_detector(config, first_round_checkpoint, device='cuda:'+str(gpu_id))
   
+  # build dataloader from training dataset and unlabelled indices
+  trn_loader = build_dataloader(
+              trn_dataset, #this is the full dataset
+              samples_per_gpu, #cfg.data.samples_per_gpu,
+              cfg.data.workers_per_gpu,
+              # cfg.gpus will be ignored if distributed
+              num_gpus,
+              dist=False,
+              #shuffle=False,
+              seed=cfg.seed,
+              indices_file=cfg.indices_file)
+  
+  
+  print("\n Uncertainty score calculation in progress...\n")  
+  # Use the trained model to calculate uncertainty score of each unlabelled image
+  uncertainty_scores = get_uncertainty_scores(model, trn_loader, no_of_trn_samples, targeted_uncertainty_cls)
+  #------------------ end of uncertainty score calculation ---------------------
+
+  # select the next set of training images with highest entropy/uncertainty
+  labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
+  unlabelled_indices = np.loadtxt(strat_dir+"/unlabelledIndices.txt",dtype=int)
+  #print(len(unlabelled_indices),len(labelled_indices))
+  selected_indices = torch.argsort(uncertainty_scores,descending=True)[:budget].numpy()
+  labelled_indices = np.concatenate([labelled_indices, selected_indices])
+  unlabelled_indices = np.setdiff1d(unlabelled_indices, selected_indices)
+  #print(len(unlabelled_indices),len(labelled_indices))
+  # save the current list of labelled & unlabelled indices to separate textfiles
+  np.savetxt(strat_dir + "/labelledIndices.txt", labelled_indices, fmt='%i')
+  np.savetxt(strat_dir + "/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
+
   # print current selection stats
   labelled_stats = get_class_statistics(trn_dataset, labelled_indices)
   test_log.write("Labelled Dataset Statistics for Round-{}\n".format(str(n+2)))
@@ -294,13 +320,12 @@ for n in range(no_of_rounds - 1):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
-  test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
   
   # prepare Validation file from labelled file
   custom_val_file = prepare_val_file(trn_dataset, labelled_indices, strat_dir=strat_dir)
 
   #----- train current model -----#
-  indicesFile = os.path.join(strat_dir, "labelledIndices.txt")
+  indicesFile = os.path.join(strat_dir,"labelledIndices.txt")
 
   train_command ='python {} {} --work-dir {} --indices {} --cfg-options'.format(train_script, config, strat_dir, indicesFile)
   train_command = train_command.split()
@@ -325,7 +350,6 @@ for n in range(no_of_rounds - 1):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
-
-  # close log file at the end of each round
-  test_log.close()
-  #---------------------- End of current round training ----------------------#
+  
+  #--------------------------- End of current round -----------------------------#
+test_log.close()

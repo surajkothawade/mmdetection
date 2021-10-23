@@ -687,3 +687,18 @@ def get_image_wise_attributes(json_file):
                                         'timeofday': item['attributes']['timeofday'], \
                                         'scene': item['attributes']['scene']}
   return attribute_dict, img_attribute_dict
+
+def get_rare_attribute_statistics(dataset, indices, attr_details, img_attribute_dict):  
+  selected_rare_indices, no_of_rare_obj = list(), 0   # define empty list to hold image indices with rare attributes
+  attr_class, attr_property, attr_value, attr_budget = attr_details
+  #print(len(indices))
+  for i in indices:
+    img_data, index = dataset[i]
+    gt_labels = img_data['gt_labels'].data.numpy()
+    img_name =  img_data['img_metas'].data['filename'].split('/')[-1]
+    if attr_class in gt_labels and img_attribute_dict[img_name][attr_property] == attr_value:
+        for label in gt_labels:
+          if label == attr_class:
+            no_of_rare_obj += 1
+        selected_rare_indices.append(index)
+  return selected_rare_indices, no_of_rare_obj

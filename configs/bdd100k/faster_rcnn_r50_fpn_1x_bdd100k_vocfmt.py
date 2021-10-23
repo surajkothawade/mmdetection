@@ -58,8 +58,11 @@ data = dict(
         classes=CLASSES),
     test=dict(
         type=dataset_type,
-        ann_file='./data/bdd100k/VOC2012/ImageSets/Main/val.txt',
-        img_prefix='./data/bdd100k/VOC2012/',
+        ann_file=[
+                './data/bdd100k/VOC2012/ImageSets/Main/val.txt',
+                './data/bdd100k/VOC2012/ImageSets/Main/rare_test.txt'
+        ],
+        img_prefix=['./data/bdd100k/VOC2012/', './data/bdd100k/VOC2012/'],
         pipeline=test_pipeline,
         classes=CLASSES))
 evaluation = dict(interval=1, metric='mAP')
