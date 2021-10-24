@@ -48,11 +48,11 @@ from mmdet.datasets.pipelines import Compose
 #---------------------------------------------------------------------------#
 budget = 200    # set Active Learning Budget
 no_of_rounds=10 # No. of Rounds to run
-max_epochs = 200 # maximum no. of epochs to run during training
+max_epochs=150  # maximum no. of epochs to run during training
 seed = 42       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
 run = 1         # run number
-eval_interval = 10 #eval after x epochs
+eval_interval = max_epochs # eval after x epochs
 initialTraining = True
 #---------------------------------------------------------------------------#
 #----------------- Faster RCNN specific configuration ----------------------#
@@ -139,6 +139,10 @@ attr_value = 'night'
 attr_budget = split_cfg['per_imbclass_attr']
 attr_details = (attr_class, attr_property, attr_value, attr_budget)
 
+# query class settings
+query_budget = split_cfg['per_imbclass_val']
+query_details = (attr_class, attr_property, attr_value, query_budget)
+
 
 #---------------------------------------------------------------------------#
 #------------------------- Build training dataset --------------------------#
@@ -174,16 +178,21 @@ if(initialTraining):
   print("#", '-'*15, ' Labelled Dataset Statistics ', '-'*15, "#\n")
   # call custom function to create imbalance & select labelled dataset as per rare & unrare budget
   labelled_indices, unlabelled_indices = create_custom_dataset_bdd(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_train'], split_cfg['per_class_train'], imbalanced_classes, all_class_set, attr_details, img_attribute_dict)
+  
+  np.random.shuffle(unlabelled_indices)
   print('\n', len(labelled_indices), " labelled images selected!\n")
 
   rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
-  print("No. of rare objects selected: ", no_of_rare_indices)  
+  print("No. of rare objects selected: ", no_of_rare_indices)
 
-  # print("#", '-'*15, ' Query Dataset Statistics ', '-'*15, "#\n")
-  # # call custom function to select query dataset
-  # query_indices, unlabelled_indices = create_custom_dataset(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_val'], split_cfg['per_class_val'], imbalanced_classes, set(imbalanced_classes))
-  # print('\n', len(query_indices), " query images selected!")
-  # print("Query Indices selected: ", query_indices)
+  print("#", '-'*15, ' Query Dataset Statistics ', '-'*15, "#\n")
+  
+  # call custom function to select query dataset
+  query_indices, unlabelled_indices = create_custom_dataset_bdd(trn_dataset, unlabelled_indices, split_cfg['per_class_val'], split_cfg['per_class_val'], imbalanced_classes, set([]), query_details, img_attribute_dict)
+  
+  np.random.shuffle(unlabelled_indices)
+  print('\n', len(query_indices), " query images selected!")
+  print("Query Indices selected: ", query_indices)
 
   # prepare Validation file from labelled file
   custom_val_file = prepare_val_file(trn_dataset, labelled_indices)
@@ -194,7 +203,7 @@ if(initialTraining):
 
   # save indices in text file for Active Learning
   np.savetxt(os.path.join(work_dir,"labelledIndices.txt"), labelled_indices, fmt='%i')
-  # np.savetxt(os.path.join(work_dir,"queryIndices.txt"), query_indices, fmt='%i')
+  np.savetxt(os.path.join(work_dir,"queryIndices.txt"), query_indices, fmt='%i')
   np.savetxt(os.path.join(work_dir,"unlabelledIndices.txt"), unlabelled_indices, fmt='%i')
 
   # print current selection stats
@@ -251,8 +260,7 @@ if(not(os.path.exists(strat_dir))):
     os.makedirs(strat_dir)
 
 # copy labelled, unlabelled indices file from first round backup file. Only these indices are changed in AL rounds
-# for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
-for file in ("labelledIndices.txt", "unlabelledIndices.txt"):
+for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
   src_file = os.path.join(work_dir, file)
   dst_file = os.path.join(strat_dir, file)
   copy_command = 'cp {} {}'.format(src_file, dst_file)

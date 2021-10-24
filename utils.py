@@ -429,7 +429,7 @@ def prepare_val_file(trn_dataset, indices, filename_07='trainval_07.txt', filena
   trnval_07_file = open(os.path.join(strat_dir, filename_07), 'w')
   trnval_12_file = open(os.path.join(strat_dir,filename_12), 'w')
   for i, index in enumerate(indices):
-    img_prefix = trn_dataset[index][0]['img_metas'].data['filename'].split('/')[2]
+    img_prefix = trn_dataset[index][0]['img_metas'].data['filename'].split('/')[-3]
     img_name = trn_dataset[index][0]['img_metas'].data['filename'].split('/')[-1].split('.')[0]
     if img_prefix == 'VOC2007':
       trnval_07_file.write(img_name + '\n')
@@ -605,6 +605,7 @@ def execute(cmd):
     return_code = popen.wait()
     if return_code:
         raise subprocess.CalledProcessError(return_code, cmd)
+
 #---------------------------------------------------------------------------#
 #-------- Custom function to create Class Imbalance for BDD dataset --------#
 #---------------------------------------------------------------------------#
@@ -614,7 +615,6 @@ def create_custom_dataset_bdd(fullSet, all_indices, rare_class_budget, unrare_cl
   labelled_indices, unlabelled_indices = list(), list()
   exhausted_rare_classes = set()
   attr_class, attr_property, attr_value, attr_budget = attr_details
-
   # initialize budget for rare and unrare class from the split_config file
   for i in range(len(fullSet.CLASSES)):
     if i in imbalanced_classes:
@@ -624,6 +624,9 @@ def create_custom_dataset_bdd(fullSet, all_indices, rare_class_budget, unrare_cl
   
   # iterate through whole dataset to select images class wise
   for k,i in enumerate(all_indices):
+    if not len(all_classes) and attr_budget <= 0:       # if budget exceeded for all the classes, stop & return dataset
+      #print("\nall class budget exhausted...")
+      break
     img_data, index = fullSet[i]
     gt_labels = img_data['gt_labels'].data.numpy()
     #break
@@ -633,6 +636,7 @@ def create_custom_dataset_bdd(fullSet, all_indices, rare_class_budget, unrare_cl
     if attr_class in gt_labels and img_attr == attr_value:
       if attr_budget > 0:
         # print("attr budget = ", attr_budget)
+        # print("rare index -> ", index)
         labelled_indices.append(index)
         attr_budget -= sum(gt_labels == attr_class)
       continue
@@ -642,18 +646,15 @@ def create_custom_dataset_bdd(fullSet, all_indices, rare_class_budget, unrare_cl
     # else add image to the labelled pool and decrease budget class wise
     for label, no_of_objects in Counter(gt_labels).items():
         labelled_budget[label] -= no_of_objects # decrease budget
-
+        
         if label in all_classes and labelled_budget[label] <= 0: # budget exhausted
-          # print(fullSet.CLASSES[label]," class exhausted...")
+          #print(fullSet.CLASSES[label]," class exhausted...")
           all_classes.remove(label)
           if label in imbalanced_classes:     # if rare class
-            # print("added to rare class list")
+            #print("added to rare class list")
             exhausted_rare_classes.add(label) # add to exhausted list of rare_classes
     
     labelled_indices.append(index)  # add image to labelled pool
-    if not len(all_classes):        # if budget exceeded for all the classes, stop & return dataset
-      #print("\nall class budget exhausted...")
-      break
   
   # remove labelled indices from the full list
   labelled_indices = np.asarray(labelled_indices)
