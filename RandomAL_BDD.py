@@ -53,7 +53,7 @@ seed = 42       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
 run = 1         # run number
 eval_interval = max_epochs # eval after x epochs
-initialTraining = True
+initialTraining = False
 #---------------------------------------------------------------------------#
 #----------------- Faster RCNN specific configuration ----------------------#
 #---------------------------------------------------------------------------#
