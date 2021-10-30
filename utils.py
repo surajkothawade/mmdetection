@@ -689,17 +689,120 @@ def get_image_wise_attributes(json_file):
                                         'scene': item['attributes']['scene']}
   return attribute_dict, img_attribute_dict
 
-def get_rare_attribute_statistics(dataset, indices, attr_details, img_attribute_dict):  
+#---------------------------------------------------------------------------#
+#----- Custom function to get rare attribute statistics for BDD dataset ----#
+#---------------------------------------------------------------------------#
+def get_rare_attribute_statistics(dataset, indices, attr_details, img_attribute_dict, rare_class=True):  
   selected_rare_indices, no_of_rare_obj = list(), 0   # define empty list to hold image indices with rare attributes
-  attr_class, attr_property, attr_value, attr_budget = attr_details
+  if rare_class:
+    attr_class, attr_property, attr_value, attr_budget = attr_details
+  else:
+    attr_property, attr_value, rare_budget, unrare_budget = attr_details
   #print(len(indices))
   for i in indices:
     img_data, index = dataset[i]
     gt_labels = img_data['gt_labels'].data.numpy()
     img_name =  img_data['img_metas'].data['filename'].split('/')[-1]
-    if attr_class in gt_labels and img_attribute_dict[img_name][attr_property] == attr_value:
-        for label in gt_labels:
-          if label == attr_class:
-            no_of_rare_obj += 1
-        selected_rare_indices.append(index)
+    if img_attribute_dict[img_name][attr_property] == attr_value:
+      if rare_class:
+        if attr_class in gt_labels:
+          for label in gt_labels:
+            if label == attr_class:
+              no_of_rare_obj += 1
+          selected_rare_indices.append(index)
+      else:
+          no_of_rare_obj += 1
+          selected_rare_indices.append(index)
+
   return selected_rare_indices, no_of_rare_obj
+
+#---------------------------------------------------------------------------#
+#------ Custom function to create attribute Imbalance for BDD dataset ------#
+#---------------------------------------------------------------------------#
+def create_dataset_with_only_attribute_imbalance_bdd(fullSet, all_indices, attr_imbalance_details, img_attribute_dict):
+  rare_attr_type, rare_attr_value, rare_attr_budget, unrare_attr_budget = attr_imbalance_details
+  labelled_indices, unlabelled_indices = list(), list()
+
+  # iterate through whole dataset to select images class wise
+  for k,i in enumerate(all_indices):
+    if rare_attr_budget <= 0 and unrare_attr_budget <= 0: # if budget exceeded for both rare & unrare type, stop & return dataset
+      #print("\nall type budget exhausted...")
+      break
+    img_data, index = fullSet[i]
+    #break
+    img_name = img_data['img_metas'].data['filename'].split('/')[-1]
+    img_attr = img_attribute_dict[img_name][rare_attr_type]
+    if img_attr == rare_attr_value:
+      if rare_attr_budget > 0:
+        rare_attr_budget -= 1
+        labelled_indices.append(index)
+    else:
+      if unrare_attr_budget > 0:
+        unrare_attr_budget -= 1
+        labelled_indices.append(index)
+  
+  # remove labelled indices from the full list
+  labelled_indices = np.asarray(labelled_indices)
+  unlabelled_indices = np.setdiff1d(all_indices, labelled_indices)
+
+  # print dataset statistics
+  stats = get_class_statistics(fullSet, labelled_indices)
+  
+  return labelled_indices, unlabelled_indices
+
+#---------------------------------------------------------------------------#
+#---- Custom function to create rare attribute test file for BDD dataset ---#
+#---------------------------------------------------------------------------#
+def prepare_rare_test_file(json_file, attr_details, filename, rare_class_name=None):
+  # read val_train json file for image-attribute mapping
+  if rare_class_name:
+    attr_class, attr_property, attr_value, _ = attr_details
+  else:
+    attr_property, attr_value, rare_budget, unrare_budget = attr_details
+  # read validation json file
+  rd_fl = open(json_file, 'r')
+  str_data = rd_fl.read()
+  image_data = json.loads(str_data)
+
+  testfile = open(filename, "w")
+  rare_test_img_count = 0
+  for k, item in enumerate(image_data):
+    img_name = item['name'].split('.')[0]
+    if item['attributes'][attr_property] == attr_value:
+      if rare_class_name:
+        for label in item['labels']:
+          if label['category'] == rare_class_name:
+            # print(img_name, '->', label['category'], '+', item['attributes'][attr_property])
+            testfile.write(img_name + '\n')
+            rare_test_img_count += 1
+            break
+      else:
+        # print(img_name, '->', item['attributes'][attr_property])
+        testfile.write(img_name + '\n')
+        rare_test_img_count += 1
+  return rare_test_img_count
+
+#---------------------------------------------------------------------------#
+#------- Custom function to extract global features from backbone ----------#
+#---------------------------------------------------------------------------#
+def extract_global_descriptor(model, img_loader, no_of_imgs=None):
+  device = next(model.parameters()).device  # model device
+  img_features = list()
+  img_indices = list()
+  for i, data_batch in enumerate(tqdm(img_loader)):     # for each batch
+              
+        # split the dataloader output into image_data and dataset indices
+        img_data, indices = data_batch[0], data_batch[1].numpy()
+        
+        imgs, img_metas = img_data['img'].data[0].to(device=device), img_data['img_metas'].data[0]
+        
+        # extract image features from backbone
+        with torch.no_grad():
+            batch_features = model.backbone(imgs) # extract 6 feature vectors of varying dims
+            for j, img_feature in enumerate(batch_features[-1]): # take the last feature vector of 2048 * 18 * 32
+              # print(img_feature.shape)
+              img_feature, _ = torch.max(img_feature, dim=0)     # take max of all 2048 channel dimention
+              # print(img_feature.shape)
+              img_features.append(img_feature)  # add feature to list
+              img_indices.append(indices[j])    # add image index to list
+  return img_features, img_indices
