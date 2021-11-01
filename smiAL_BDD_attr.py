@@ -386,12 +386,10 @@ for n in range(no_of_rounds-1):
   # print("unlabeled indices after setdiff: ", unlabelled_indices)
 
   # augment rare objects from selected data samples into query set
-  rare_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_details, img_attribute_dict)  ///// testing required
-  #print(rare_indices, rare_counts)
-  rare_details = (attr_class, attr_property, attr_value, rare_counts)
-  augmented_query_indices, _ = create_custom_dataset_bdd(trn_dataset, rare_indices, 0, 0, imbalanced_classes, set([]), rare_details, img_attribute_dict) /////
+  aug_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_details, img_attribute_dict, rare_class=False)
+  #print(aug_indices, rare_counts)
 
-  query_indices = np.concatenate([query_indices, augmented_query_indices])
+  query_indices = np.concatenate([query_indices, aug_indices])
   print("Round ", str(n+2), " dataset statistics:- U: ", len(unlabelled_indices), " L: ", len(labelled_indices), " Q: " , len(query_indices))
 
   #print(len(unlabelled_indices),len(labelled_indices))
