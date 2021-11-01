@@ -25,6 +25,7 @@ print(get_compiler_version())
 # import other modules
 import warnings
 import copy
+import gc
 import subprocess
 from collections import defaultdict, Counter
 from tqdm import tqdm
@@ -227,13 +228,10 @@ if(initialTraining):
 #----------------------- Run Entropy Sampling Loop -------------------------#
 #---------------------------------------------------------------------------#
 
-targeted = True                 # set to TRUE to run Targeted Entropy
-if(not(targeted)):
-    targeted_uncertainty_cls = None
-    strat_dir = os.path.join(work_dir, "entropySampling", str(run))
-else:
-    targeted_uncertainty_cls = imbalanced_classes
-    strat_dir = os.path.join(work_dir, "targetedEntropySampling", str(run))
+# targeted_uncertainty_cls = imbalanced_classes #The old uncertainty based implementation
+targeted_uncertainty_cls = None
+
+strat_dir = os.path.join(work_dir, "targetedEntropySamplingProduct", str(run))
     
 # create a subdirectory to store log files and data
 if(not(os.path.exists(strat_dir))):
@@ -249,11 +247,8 @@ for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt")
 
 # set checkpoint and log file name
 last_epoch_checkpoint = strat_dir + '/epoch_' + str(max_epochs) + '.pth'
-if targeted:
-  test_log = open(os.path.join(strat_dir,"Targeted_Entropy_test_mAP.txt"), 'w')
-else:
-  test_log = open(os.path.join(strat_dir,"Entropy_test_mAP.txt"), 'w')
 
+test_log = open(os.path.join(strat_dir,"Targeted_Entropy_test_mAP.txt"), 'w')
 # set the indices file name
 cfg.indices_file = strat_dir + "/unlabelledIndices.txt"
 
@@ -269,28 +264,57 @@ for n in range(no_of_rounds-1):
     model = init_detector(config, first_round_checkpoint, device='cuda:'+str(gpu_id))
   
   # build dataloader from training dataset and unlabelled indices
-  trn_loader = build_dataloader(
+  unlb_loader = build_dataloader(
               trn_dataset, #this is the full dataset
               samples_per_gpu, #cfg.data.samples_per_gpu,
               cfg.data.workers_per_gpu,
               # cfg.gpus will be ignored if distributed
               num_gpus,
               dist=False,
-              #shuffle=False,
+              # shuffle=False,
               seed=cfg.seed,
               indices_file=cfg.indices_file)
   
+  cfg.indices_file = strat_dir + "/queryIndices.txt"
+  query_loader = build_dataloader(
+                trn_dataset,
+                samples_per_gpu, #cfg.data.samples_per_gpu,
+                cfg.data.workers_per_gpu,
+                # cfg.gpus will be ignored if distributed
+                num_gpus,
+                dist=False,
+                # shuffle=False,
+                seed=cfg.seed,
+                indices_file=cfg.indices_file)
   
   print("\n Uncertainty score calculation in progress...\n")  
+  model.eval()
+  #---------------Compute similarity scores with the query dataset----------------
+  # extract features and compute kernel
+  print("Extracting features for the query dataset:")
+  query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
+  unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
+  query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
+  similarity_scores = np.amax(query_image_sim, axis=0)
   # Use the trained model to calculate uncertainty score of each unlabelled image
-  uncertainty_scores = get_uncertainty_scores(model, trn_loader, no_of_trn_samples, targeted_uncertainty_cls)
+  uncertainty_scores = get_uncertainty_scores(model, unlb_loader, no_of_trn_samples, targeted_uncertainty_cls)
+  uncertainty_scores = uncertainty_scores[unlabelled_indices] #get uncertainty scores of only the unlabelled data points
   #------------------ end of uncertainty score calculation ---------------------
+  print("len(uncertainty_scores): ", len(uncertainty_scores), " len(similarity_scores): ", len(similarity_scores))
+  assert(len(uncertainty_scores) == len(similarity_scores))
+  uncertainty_similarity_scores = uncertainty_scores * similarity_scores
+  #Free memory
+  del model
+  del unlb_loader
+  del query_loader
+  gc.collect()
 
   # select the next set of training images with highest entropy/uncertainty
   labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
   unlabelled_indices = np.loadtxt(strat_dir+"/unlabelledIndices.txt",dtype=int)
   #print(len(unlabelled_indices),len(labelled_indices))
-  selected_indices = torch.argsort(uncertainty_scores,descending=True)[:budget].numpy()
+  unlabeled_selected_indices = torch.argsort(torch.Tensor(uncertainty_similarity_scores),descending=True)[:budget].numpy() #The argsort is w.r.t the unlabelled indices
+  selected_indices = unlabelled_indices[unlabeled_selected_indices] #get the indices w.r.t the training dataset
   labelled_indices = np.concatenate([labelled_indices, selected_indices])
   unlabelled_indices = np.setdiff1d(unlabelled_indices, selected_indices)
   #print(len(unlabelled_indices),len(labelled_indices))
