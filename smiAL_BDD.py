@@ -158,6 +158,12 @@ all_classes = set(range(len(trn_dataset.CLASSES)))
 # get image wise attribute mapping
 attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
 
+rare_class_name = trn_dataset.CLASSES[imbalanced_classes[0]]
+rare_test_file = './data/bdd100k/VOC2012/ImageSets/Main/' + 'rare_test.txt'
+if(not(os.path.exists(rare_test_file))):
+  rare_test_img_count = prepare_rare_test_file('data/det_val.json', attr_details, rare_test_file, rare_class_name)
+  print("Test file for attribute imbalance created with ", rare_test_img_count, " images")
+
 #---------------------------------------------------------------------------#
 #---- Create Imbalanced Labelled set and Query set from training dataset ---#
 #---------------------------------------------------------------------------#

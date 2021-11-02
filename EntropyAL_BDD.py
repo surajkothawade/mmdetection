@@ -25,6 +25,7 @@ print(get_compiler_version())
 
 # import other modules
 import warnings
+import gc
 import copy
 import subprocess
 from collections import defaultdict, Counter
@@ -130,7 +131,7 @@ split_cfg = {
              "per_class_lake":50}      # Number of samples per unrare class in the unlabeled dataset
 
 #------------- select imbalanced classes -------------#
-imbalanced_classes = [6]     # label of motorbike class 
+imbalanced_classes = [0]     # label of pedestrian class 
 
 #---------- select attribute for imbalancing ---------#
 attr_class = imbalanced_classes[0]
@@ -158,6 +159,12 @@ all_classes = set(range(len(trn_dataset.CLASSES)))
 
 # get image wise attribute mapping
 attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
+
+rare_class_name = trn_dataset.CLASSES[imbalanced_classes[0]]
+rare_test_file = './data/bdd100k/VOC2012/ImageSets/Main/' + 'rare_test.txt'
+if(not(os.path.exists(rare_test_file))):
+	rare_test_img_count = prepare_rare_test_file('data/det_val.json', attr_details, rare_test_file, rare_class_name)
+ 	print("Test file for attribute imbalance created with ", rare_test_img_count, " images")
 
 #---------------------------------------------------------------------------#
 #---- Create Imbalanced Labelled set and Query set from training dataset ---#
@@ -203,7 +210,7 @@ if(initialTraining):
 
   # save indices in text file for Active Learning
   np.savetxt(os.path.join(work_dir,"labelledIndices.txt"), labelled_indices, fmt='%i')
-  # np.savetxt(os.path.join(work_dir,"queryIndices.txt"), query_indices, fmt='%i')
+  np.savetxt(os.path.join(work_dir,"queryIndices.txt"), query_indices, fmt='%i')
   np.savetxt(os.path.join(work_dir,"unlabelledIndices.txt"), unlabelled_indices, fmt='%i')
 
   # print current selection stats
@@ -266,8 +273,7 @@ if(not(os.path.exists(strat_dir))):
     os.makedirs(strat_dir)
     
 # copy labelled, unlabelled indices file from first round backup file. Only these indices are changed in AL rounds
-#for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
-for file in ("labelledIndices.txt", "unlabelledIndices.txt"):
+for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
   src_file = os.path.join(work_dir, file)
   dst_file = os.path.join(strat_dir, file)
   copy_command = 'cp {} {}'.format(src_file, dst_file)
