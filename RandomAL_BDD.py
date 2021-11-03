@@ -51,9 +51,9 @@ no_of_rounds=10 # No. of Rounds to run
 max_epochs=150  # maximum no. of epochs to run during training
 seed = 42       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
-run = 1         # run number
+run = 1       # run number
 eval_interval = max_epochs # eval after x epochs
-initialTraining = False
+initialTraining = True
 #---------------------------------------------------------------------------#
 #----------------- Faster RCNN specific configuration ----------------------#
 #---------------------------------------------------------------------------#
@@ -66,7 +66,7 @@ proposals_per_img = 300     # maximum proposals to be generated per image
 #---------------- Work_dir, Checkpoint & Config file settings --------------#
 #---------------------------------------------------------------------------#
 root = './'
-config = './faster_rcnn_r50_fpn_AL_bdd100k.py'
+config = './faster_rcnn_r50_fpn_AL_bdd100k_pedestrain.py' #Set to pedestrain!
 base_config = './configs/bdd100k/faster_rcnn_r50_fpn_1x_bdd100k_vocfmt.py'
 work_dir = './work_dirs/' + config.split('/')[-1].split('.')[0]
 train_script = root + 'tools/train.py'
@@ -81,7 +81,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  0
+gpu_id =  1
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -121,16 +121,27 @@ file_ptr.close()
 #---------------------------------------------------------------------------#
 #------------------ Class Imbalance specific setting -----------------------#
 #---------------------------------------------------------------------------#
+# Pedestrian at night split cfg
 split_cfg = {     
-             "per_imbclass_train":90,  # Number of samples per rare class in the train dataset
-             "per_imbclass_val":5,     # Number of samples per rare class in the validation dataset
-             "per_imbclass_attr":10,   # Number of samples per rare class in the unlabeled dataset
-             "per_class_train":100,    # Number of samples per unrare class in the train dataset
-             "per_class_val":0,        # Number of samples per unrare class in the validation dataset
-             "per_class_lake":50}      # Number of samples per unrare class in the unlabeled dataset
+"per_imbclass_train":90,  # Number of samples per rare class in the train dataset
+"per_imbclass_val":20,     # Number of samples per rare class in the validation dataset
+"per_imbclass_attr":10,   # Number of samples per rare class in the unlabeled dataset
+"per_class_train":100,    # Number of samples per unrare class in the train dataset
+"per_class_val":0,        # Number of samples per unrare class in the validation dataset
+"per_class_lake":50}      # Number of samples per unrare class in the unlabeled dataset
+
+# Motorcycle at night split cfg
+# split_cfg = {     
+#              "per_imbclass_train":90,  # Number of samples per rare class in the train dataset
+#              "per_imbclass_val":5,     # Number of samples per rare class in the validation dataset
+#              "per_imbclass_attr":10,   # Number of samples per rare class in the unlabeled dataset
+#              "per_class_train":100,    # Number of samples per unrare class in the train dataset
+#              "per_class_val":0,        # Number of samples per unrare class in the validation dataset
+#              "per_class_lake":50}      # Number of samples per unrare class in the unlabeled dataset
 
 #------------- select imbalanced classes -------------#
-imbalanced_classes = [6]     # label of motorbike class 
+imbalanced_classes = [0]     # label of pesdestrain class 
+# imbalanced_classes = [6]     # label of motorbike class 
 
 #---------- select attribute for imbalancing ---------#
 attr_class = imbalanced_classes[0]
@@ -311,7 +322,7 @@ for n in range(no_of_rounds - 1):
   #----- train current model -----#
   indicesFile = os.path.join(strat_dir, "labelledIndices.txt")
 
-  train_command ='python {} {} --work-dir {} --indices {} --cfg-options'.format(train_script, config, strat_dir, indicesFile)
+  train_command ='python {} {} --work-dir {} --indices {} --gpu-ids {} --cfg-options'.format(train_script, config, strat_dir, indicesFile, gpu_id)
   train_command = train_command.split()
   train_command.append('data.val.ann_file="{}"'.format(custom_val_file))
   print(' '.join(train_command))
