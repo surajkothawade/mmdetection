@@ -26,6 +26,7 @@ print(get_compiler_version())
 # import other modules
 import warnings
 import copy
+import gc
 import subprocess
 from collections import defaultdict, Counter
 from tqdm import tqdm
@@ -122,7 +123,7 @@ file_ptr.close()
 #------------------ Class Imbalance specific setting -----------------------#
 #---------------------------------------------------------------------------#
 split_cfg = {     
-             "per_imbclass_train":90,  # Number of samples per rare class in the train dataset
+             "per_imbclass_train":10,  # Number of samples per rare class in the train dataset
              "per_imbclass_val":5,     # Number of samples per rare class in the validation dataset
              "per_imbclass_attr":10,   # Number of samples per rare class in the unlabeled dataset
              "per_class_train":100,    # Number of samples per unrare class in the train dataset
@@ -130,7 +131,7 @@ split_cfg = {
              "per_class_lake":50}      # Number of samples per unrare class in the unlabeled dataset
 
 #------------- select imbalanced classes -------------#
-imbalanced_classes = [6]     # label of motorbike class 
+imbalanced_classes = [0]     # label of pedestrian class 
 
 #---------- select attribute for imbalancing ---------#
 attr_class = imbalanced_classes[0]
@@ -162,8 +163,8 @@ attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.j
 rare_class_name = trn_dataset.CLASSES[imbalanced_classes[0]]
 rare_test_file = './data/bdd100k/VOC2012/ImageSets/Main/' + 'rare_test.txt'
 if(not(os.path.exists(rare_test_file))):
-  rare_test_img_count = prepare_rare_test_file('data/det_val.json', attr_details, rare_test_file, rare_class_name)
-  print("Test file for attribute imbalance created with ", rare_test_img_count, " images")
+    rare_test_img_count = prepare_rare_test_file('data/det_val.json', attr_details, rare_test_file, rare_class_name)
+    print("Test file for attribute imbalance created with ", rare_test_img_count, " images")
 
 #---------------------------------------------------------------------------#
 #---- Create Imbalanced Labelled set and Query set from training dataset ---#
@@ -180,7 +181,7 @@ if(initialTraining):
   unlabelled_indices = np.random.permutation(no_of_trn_samples)
 
   all_class_set = set(range(len(trn_dataset.CLASSES)))
-  
+
   print("#", '-'*15, ' Labelled Dataset Statistics ', '-'*15, "#\n")
   # call custom function to create imbalance & select labelled dataset as per rare & unrare budget
   labelled_indices, unlabelled_indices = create_custom_dataset_bdd(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_train'], split_cfg['per_class_train'], imbalanced_classes, all_class_set, attr_details, img_attribute_dict)
@@ -257,14 +258,16 @@ if(initialTraining):
 
 
 #---------------------------------------------------------------------------#
-#------------------------ Run Random Sampling Loop -------------------------#
+#----------------------- Run Entropy Sampling Loop -------------------------#
 #---------------------------------------------------------------------------#
+targeted_uncertainty_cls = None
 
-# create a subdirectory to store log files & data
-strat_dir = os.path.join(work_dir, "randomSampling", str(run))
+strat_dir = os.path.join(work_dir, "targetedEntropySamplingProduct", str(run))
+    
+# create a subdirectory to store log files and data
 if(not(os.path.exists(strat_dir))):
     os.makedirs(strat_dir)
-
+    
 # copy labelled, unlabelled indices file from first round backup file. Only these indices are changed in AL rounds
 for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
   src_file = os.path.join(work_dir, file)
@@ -275,31 +278,90 @@ for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt")
 
 # set checkpoint and log file name
 last_epoch_checkpoint = strat_dir + '/epoch_' + str(max_epochs) + '.pth'
-test_log_file = os.path.join(strat_dir,"Random_test_mAP.txt")
 
-# load from labelled, unlabelled indices fies
-labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
-unlabelled_indices = np.loadtxt(strat_dir+"/unlabelledIndices.txt",dtype=int)
+test_log_file = os.path.join(strat_dir,"Targeted_Entropy_test_mAP.txt")
 
-#------------ start training --------------#
-for n in range(no_of_rounds - 1):
+#------------ start training for fixed no. of rounds --------------#
+for n in range(no_of_rounds-1):
   # open log file at the beginning of each round
   test_log = open(test_log_file, 'a')
-  
-  print("\n","="*20," beginning of round ",n+2," ","="*20,"\n")
-  # select training indices equal to budget
-  selected_indices = unlabelled_indices[:budget]
 
-  # remove selected indices from the unlabelled indices set & add them to the list of labelled indices
-  unlabelled_indices = unlabelled_indices[budget:]
-  labelled_indices = np.concatenate([labelled_indices,selected_indices])
+  print("\n","="*20," beginning of round ",n+2," ","="*20,"\n")
+  
+  # instantiate the trained model
+  if n:
+    model = init_detector(config, checkpoint, device='cuda:'+str(gpu_id))
+  else:     # for second round, use first round model trained with random indices
+    print("second round uses first round model trained with random indices...")
+    model = init_detector(config, first_round_checkpoint, device='cuda:'+str(gpu_id))
+  
+  # set the indices file name
+  cfg.indices_file = strat_dir + "/unlabelledIndices.txt"
+  # build dataloader from training dataset and unlabelled indices
+  unlb_loader = build_dataloader(
+              trn_dataset, #this is the full dataset
+              samples_per_gpu, #cfg.data.samples_per_gpu,
+              cfg.data.workers_per_gpu,
+              # cfg.gpus will be ignored if distributed
+              num_gpus,
+              dist=False,
+              # shuffle=False,
+              seed=cfg.seed,
+              indices_file=cfg.indices_file)
+  
+  cfg.indices_file = strat_dir + "/queryIndices.txt"
+  query_loader = build_dataloader(
+                trn_dataset,
+                samples_per_gpu, #cfg.data.samples_per_gpu,
+                cfg.data.workers_per_gpu,
+                # cfg.gpus will be ignored if distributed
+                num_gpus,
+                dist=False,
+                # shuffle=False,
+                seed=cfg.seed,
+                indices_file=cfg.indices_file)
+  
+  print("\n Uncertainty score calculation in progress...\n")  
+  model.eval()
+  #------------- Compute uncertainty similarity scores with the query dataset --------------
+  # extract features and compute kernel
+  print("Extracting features for the query dataset:")
+  query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
+  unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
+  query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
+  similarity_scores = np.amax(query_image_sim, axis=0)
+
+  # Use the trained model to calculate uncertainty score of each unlabelled image
+  uncertainty_scores = get_uncertainty_scores(model, unlb_loader, no_of_trn_samples, targeted_uncertainty_cls)
+  uncertainty_scores = uncertainty_scores[unlabelled_indices] # get uncertainty scores of only the unlabelled data points
+
+  print("len(uncertainty_scores): ", len(uncertainty_scores), " len(similarity_scores): ", len(similarity_scores))
+  assert(len(uncertainty_scores) == len(similarity_scores))
+  uncertainty_similarity_scores = uncertainty_scores * similarity_scores # calcaulate a score for each image as per the indices ordering in unlabelled_indices
+  #Free memory
+  del model
+  del unlb_loader
+  del query_loader
+  gc.collect()
+  #------------------ end of uncertainty similarity score calculation ---------------------
+
+  # select the next set of training images with highest entropy/uncertainty * similarity
+  labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
+  unlabelled_indices = np.asarray(unlabelled_indices)
+  #print(len(unlabelled_indices),len(labelled_indices))
+  unlabeled_selected_indices = torch.argsort(torch.Tensor(uncertainty_similarity_scores),descending=True)[:budget].numpy() # the argsort is w.r.t the unlabelled indices only
+  selected_indices = unlabelled_indices[unlabeled_selected_indices] # get the indices w.r.t the training dataset
+  labelled_indices = np.concatenate([labelled_indices, selected_indices])
+  unlabelled_indices = np.setdiff1d(unlabelled_indices, selected_indices)
+  np.random.shuffle(unlabelled_indices)
+
+  #print(len(unlabelled_indices),len(labelled_indices))
+  # save the current list of labelled & unlabelled indices to separate textfiles
+  np.savetxt(strat_dir + "/labelledIndices.txt", labelled_indices, fmt='%i')
+  np.savetxt(strat_dir + "/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
 
   rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
   print("No. of rare objects selected: ", no_of_rare_indices)
-
-  # save the current list of labelled indices to the indices textfile
-  np.savetxt(strat_dir+"/labelledIndices.txt", labelled_indices, fmt='%i')
-  np.savetxt(strat_dir+"/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
   
   # print current selection stats
   labelled_stats = get_class_statistics(trn_dataset, labelled_indices)
@@ -309,13 +371,12 @@ for n in range(no_of_rounds - 1):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
-  test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
   
   # prepare Validation file from labelled file
   custom_val_file = prepare_val_file(trn_dataset, labelled_indices, strat_dir=strat_dir)
 
   #----- train current model -----#
-  indicesFile = os.path.join(strat_dir, "labelledIndices.txt")
+  indicesFile = os.path.join(strat_dir,"labelledIndices.txt")
 
   train_command ='python {} {} --work-dir {} --indices {} --cfg-options'.format(train_script, config, strat_dir, indicesFile)
   train_command = train_command.split()
@@ -340,7 +401,7 @@ for n in range(no_of_rounds - 1):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
-
+  
   # close log file at the end of each round
   test_log.close()
-  #---------------------- End of current round training ----------------------#
+  #--------------------------- End of current round -----------------------------#

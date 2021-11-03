@@ -395,7 +395,6 @@ for n in range(no_of_rounds-1):
   # augment rare objects from selected data samples into query set
   aug_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_imbalance_details, img_attribute_dict, rare_class=False)
   #print(aug_indices, rare_counts)
-  
   query_indices = np.concatenate([query_indices, aug_indices])
   print("Round ", str(n+2), " dataset statistics:- U: ", len(unlabelled_indices), " L: ", len(labelled_indices), " Q: " , len(query_indices))
 
