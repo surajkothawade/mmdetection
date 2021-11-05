@@ -1,7 +1,8 @@
 # import numpy
 import numpy as np
 import os
-import math
+import sys
+import gc
 
 # import submodlib
 import submodlib
@@ -53,7 +54,7 @@ seed = 42       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
 run = 1         # run number
 eval_interval = max_epochs # eval after x epochs
-initialTraining = False
+initialTraining = True
 #---------------------------------------------------------------------------#
 #----------------- Faster RCNN specific configuration ----------------------#
 #---------------------------------------------------------------------------#
@@ -66,7 +67,7 @@ proposals_per_img = 300     # maximum proposals to be generated per image
 #---------------- Work_dir, Checkpoint & Config file settings --------------#
 #---------------------------------------------------------------------------#
 root = './'
-config = './faster_rcnn_r50_fpn_AL_bdd100k.py'
+config = './faster_rcnn_r50_fpn_AL_bdd100k_cycle.py'
 base_config = './configs/bdd100k/faster_rcnn_r50_fpn_1x_bdd100k_vocfmt.py'
 work_dir = './work_dirs/' + config.split('/')[-1].split('.')[0]
 train_script = root + 'tools/train.py'
@@ -81,7 +82,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  0
+gpu_id =  sys.argv[1]
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -123,14 +124,14 @@ file_ptr.close()
 #---------------------------------------------------------------------------#
 split_cfg = {     
              "per_imbclass_train":90,  # Number of samples per rare class in the train dataset
-             "per_imbclass_val":5,     # Number of samples per rare class in the validation dataset
+             "per_imbclass_val":10,    # Number of samples per rare class in the validation dataset
              "per_imbclass_attr":10,   # Number of samples per rare class in the unlabeled dataset
              "per_class_train":100,    # Number of samples per unrare class in the train dataset
              "per_class_val":0,        # Number of samples per unrare class in the validation dataset
              "per_class_lake":50}      # Number of samples per unrare class in the unlabeled dataset
 
 #------------- select imbalanced classes -------------#
-imbalanced_classes = [6]     # label of motorbike class 
+imbalanced_classes = [7]     # label of motorbike class 
 
 #---------- select attribute for imbalancing ---------#
 attr_class = imbalanced_classes[0]
@@ -142,7 +143,6 @@ attr_details = (attr_class, attr_property, attr_value, attr_budget)
 # query class settings
 query_budget = split_cfg['per_imbclass_val']
 query_details = (attr_class, attr_property, attr_value, query_budget)
-
 
 #---------------------------------------------------------------------------#
 #------------------------- Build training dataset --------------------------#
@@ -160,11 +160,15 @@ all_classes = set(range(len(trn_dataset.CLASSES)))
 attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
 
 rare_class_name = trn_dataset.CLASSES[imbalanced_classes[0]]
-rare_test_file = './data/bdd100k/VOC2012/ImageSets/Main/' + 'rare_test.txt'
+rare_test_file = './data/bdd100k/VOC2012/ImageSets/Main/' + str(sys.argv[2])
 if(not(os.path.exists(rare_test_file))):
   rare_test_img_count = prepare_rare_test_file('data/det_val.json', attr_details, rare_test_file, rare_class_name)
   print("Test file for attribute imbalance created with ", rare_test_img_count, " images")
 
+custom_test_file = [
+          './data/bdd100k/VOC2012/ImageSets/Main/val.txt',
+          './data/bdd100k/VOC2012/ImageSets/Main/' + str(sys.argv[2])
+      ]
 #---------------------------------------------------------------------------#
 #---- Create Imbalanced Labelled set and Query set from training dataset ---#
 #---------------------------------------------------------------------------#
@@ -229,7 +233,7 @@ if(initialTraining):
   #----- train initial model -----#
   indicesFile = os.path.join(work_dir,"labelledIndices.txt")
 
-  train_command ='python {} {} --work-dir {} --indices {} --cfg-options'.format(train_script, config, work_dir, indicesFile)
+  train_command ='python {} {} --work-dir {} --indices {} --gpu-ids {} --cfg-options'.format(train_script, config, work_dir, indicesFile, gpu_id)
   train_command = train_command.split()
   train_command.append('data.val.ann_file="{}"'.format(custom_val_file))
   print(' '.join(train_command))
@@ -244,10 +248,12 @@ if(initialTraining):
       print(std_out, end="")
 
   #----- test initial model ------#
-  test_command ='python {} {} {} --work-dir {} --eval mAP'.format(test_script, config, first_round_checkpoint, work_dir)
-  print(test_command)
-
-  for std_out in execute(test_command.split()):
+  test_command ='python {} {} {} --work-dir {} --eval mAP --cfg-options'.format(test_script, config, first_round_checkpoint, work_dir)
+  test_command = test_command.split()
+  test_command.append('data.test.ann_file="{}"'.format(custom_test_file))
+  print(' '.join(test_command))
+  
+  for std_out in execute(test_command):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
@@ -317,7 +323,7 @@ for n in range(no_of_rounds - 1):
   #----- train current model -----#
   indicesFile = os.path.join(strat_dir, "labelledIndices.txt")
 
-  train_command ='python {} {} --work-dir {} --indices {} --cfg-options'.format(train_script, config, strat_dir, indicesFile)
+  train_command ='python {} {} --work-dir {} --indices {} --gpu-ids {} --cfg-options'.format(train_script, config, strat_dir, indicesFile, gpu_id)
   train_command = train_command.split()
   train_command.append('data.val.ann_file="{}"'.format(custom_val_file))
   print(' '.join(train_command))
@@ -333,14 +339,17 @@ for n in range(no_of_rounds - 1):
     print(std_out, end="")
 
   #----- test initial model ------#
-  test_command ='python {} {} {} --work-dir {} --eval mAP'.format(test_script, config, checkpoint, strat_dir)
-  print(test_command)
-
-  for std_out in execute(test_command.split()):
+  test_command ='python {} {} {} --work-dir {} --eval mAP --cfg-options'.format(test_script, config, checkpoint, strat_dir)
+  test_command = test_command.split()
+  test_command.append('data.test.ann_file="{}"'.format(custom_test_file))
+  print(' '.join(test_command))
+  
+  for std_out in execute(test_command):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
 
   # close log file at the end of each round
   test_log.close()
-  #---------------------- End of current round training ----------------------#
+  #--------------------------- End of current round -----------------------------#
+
