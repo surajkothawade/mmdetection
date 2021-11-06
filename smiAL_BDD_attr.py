@@ -256,7 +256,7 @@ stopIfZeroGain = False
 stopIfNegativeGain = False
 verbose = False
 
-targeted_cls = imbalanced_classes
+# targeted_cls = imbalanced_classes
 strat_dir = os.path.join(work_dir, smi_function, str(run))
     
 # create a subdirectory to store log files and data
@@ -320,27 +320,34 @@ for n in range(no_of_rounds-1):
 
   # extract features and compute kernel
   model.eval()
-  print("Extracting features for the unlabeled dataset:")
-  if(smi_function=="fl1mi" or smi_function=="logdetmi"):
-      proposal_budget = 10
-      unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_top_k_RoI_features(model, unlb_loader, proposal_budget, feature_type="fc")
-      # print("unlabelled_dataset_feat.shape: ", unlabelled_dataset_feat.shape)
-      # print("unlabelled indices: ", unlabelled_indices)
-  else:
-      unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
   print("Extracting features for the query dataset:")
-  query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
+  query_dataset_feat, query_indices = extract_global_descriptor(model, query_loader)
+  print("query_dataset_feat.shape: ", len(query_dataset_feat), len(query_dataset_feat[0]))
+  print("query indices: ", query_indices)
+  # sys.exit()
+  print("Extracting features for the unlabeled dataset:")
+  unlabelled_dataset_feat, unlabelled_indices = extract_global_descriptor(model, unlb_loader)
+  print("query_dataset_feat.shape: ", len(unlabelled_dataset_feat), len(unlabelled_dataset_feat[0]))
+  # print("unlabelled indices: ", unlabelled_indices)
   #Free memory
   del model
   del unlb_loader
   del query_loader
   gc.collect()
   
+  #TODO: write kernel computation for global descriptors
+  unlabelled_dataset_norm = l2_normalize(unlabelled_dataset_feat)
+  query_dataset_norm = l2_normalize(query_dataset_feat)
+  print("Normalized unlabeled dataset norm shape: ", unlabelled_dataset_norm.shape)
+  print("Normalized query dataset norm shape: ", query_dataset_norm.shape)
   if(smi_function=="fl1mi" or smi_function=="logdetmi"): # only these smi functions require computing the VxV kernel
-      image_image_sim = compute_imageImage_kernel(unlabelled_dataset_feat)
+      image_image_sim = np.tensordot(unlabelled_dataset_norm, unlabelled_dataset_norm, axes=([1],[1]))
+      print("image_image_sim.shape: ", image_image_sim.shape)
       if(smi_function=="logdetmi"):
-        query_query_sim = compute_queryQuery_kernel(query_dataset_feat)
-  query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
+        query_query_sim = np.tensordot(unlabelled_dataset_norm, unlabelled_dataset_norm, axes=([1],[1]))
+        print("query_query_sim.shape: ", query_query_sim.shape)
+  query_image_sim = np.tensordot(query_dataset_norm, unlabelled_dataset_norm, axes=([1],[1])) # all functions need the QxV kernel
+  print("query_image_sim.shape: ", query_image_sim.shape)
 
   # instantiate the submodular functions using the kernels
   if(smi_function =="fl2mi"):
@@ -386,12 +393,9 @@ for n in range(no_of_rounds-1):
   # print("unlabeled indices after setdiff: ", unlabelled_indices)
 
   # augment rare objects from selected data samples into query set
-  rare_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_details, img_attribute_dict)  ///// testing required
-  #print(rare_indices, rare_counts)
-  rare_details = (attr_class, attr_property, attr_value, rare_counts)
-  augmented_query_indices, _ = create_custom_dataset_bdd(trn_dataset, rare_indices, 0, 0, imbalanced_classes, set([]), rare_details, img_attribute_dict) /////
-
-  query_indices = np.concatenate([query_indices, augmented_query_indices])
+  aug_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_imbalance_details, img_attribute_dict, rare_class=False)
+  #print(aug_indices, rare_counts)
+  query_indices = np.concatenate([query_indices, aug_indices])
   print("Round ", str(n+2), " dataset statistics:- U: ", len(unlabelled_indices), " L: ", len(labelled_indices), " Q: " , len(query_indices))
 
   #print(len(unlabelled_indices),len(labelled_indices))
