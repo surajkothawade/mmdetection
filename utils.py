@@ -471,13 +471,13 @@ def compute_queryQuery_kernel(query_dataset_feat):
 
 def compute_queryImage_kernel(query_dataset_feat, unlabeled_dataset_feat):
     query_image_sim = []
-    unlabeled_feat_norm = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension (batch_size, num_proposals, num_features)
+    unlabeled_dataset_feat = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension (batch_size, num_proposals, num_features)
     for i in range(len(query_dataset_feat)):
         query_feat = np.expand_dims(query_dataset_feat[i], axis=0)
         query_feat_norm = l2_normalize(query_feat) #l2-normalize the query feature vector along the feature dimension
         #print(query_feat_norm.shape)
-        #print(unlabeled_feat_norm.shape)
-        dotp = np.tensordot(query_feat_norm, unlabeled_feat_norm, axes=([2],[2])) #compute the dot product along the feature dimension, i.e between every GT bbox of rare class in the query image with all proposals from all images in the unlabeled set
+        #print(unlabeled_dataset_feat.shape)
+        dotp = np.tensordot(query_feat_norm, unlabeled_dataset_feat, axes=([2],[2])) #compute the dot product along the feature dimension, i.e between every GT bbox of rare class in the query image with all proposals from all images in the unlabeled set
         #print(dotp.shape)
         max_match_queryGt_proposal = np.amax(dotp, axis=(1,3)) #find the gt-proposal pair with highest similarity score for each image
         query_image_sim.append(max_match_queryGt_proposal)
@@ -491,16 +491,17 @@ def compute_queryImage_kernel(query_dataset_feat, unlabeled_dataset_feat):
 
 def compute_imageImage_kernel(unlabeled_dataset_feat, batch_size=100):
     image_image_sim = []
-    unlabeled_feat_norm = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension
-    #print(unlabeled_feat_norm.shape)
-    unlabeled_data_size = unlabeled_feat_norm.shape[0]
+    unlabeled_dataset_feat = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension
+    # print("unlabeled_dataset_feat.shape: ", unlabeled_dataset_feat.shape)
+    unlabeled_data_size = unlabeled_dataset_feat.shape[0]
     for i in range(math.ceil(unlabeled_data_size/batch_size)): #batch through the unlabeled dataset to compute the similarity matrix
         start_ind = i*batch_size
         end_ind = start_ind + batch_size
         if(end_ind > unlabeled_data_size):
             end_ind = unlabeled_data_size
-        unlabeled_feat_batch = unlabeled_feat_norm[start_ind:end_ind,:,:]
-        dotp = np.tensordot(unlabeled_feat_batch, unlabeled_feat_norm, axes=([2],[2])) #compute the dot product along the feature dimension, i.e between every proposal in an unlabeled image with all proposals from all images in the unlabeled set
+        unlabeled_feat_batch = unlabeled_dataset_feat[start_ind:end_ind,:,:]
+        # print("unlabeled_dataset_feat.shape: ", unlabeled_dataset_feat.shape)
+        dotp = np.tensordot(unlabeled_feat_batch, unlabeled_dataset_feat, axes=([2],[2])) #compute the dot product along the feature dimension, i.e between every proposal in an unlabeled image with all proposals from all images in the unlabeled set
         #print(dotp.shape)
         max_match_unlabeledProposal_proposal = np.amax(dotp, axis=(1,3)) #find the proposal-proposal pair with highest similarity score for each image
         #print(max_match_unlabeledProposal_proposal.shape)

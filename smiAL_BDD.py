@@ -1,3 +1,4 @@
+# import numpy
 import numpy as np
 import os
 import sys
@@ -81,7 +82,7 @@ last_epoch_checkpoint = work_dir + '/epoch_' + str(max_epochs) + '.pth'
 # set samples_per_gpu & num_gpus such that (samples_per_gpu * num_gpus) is a factor of Active Learning budget
 samples_per_gpu = 2     #default is 2
 num_gpus = 1            #default is 2
-gpu_id =  sys.argv[2]
+gpu_id =  sys.argv[1]
 # if (budget % (samples_per_gpu * num_gpus)) != 0:
 #   raise Exception('Budget should be a multiple of samples_per_gpu * no_of_gpus')
 
@@ -171,11 +172,15 @@ all_classes = set(range(len(trn_dataset.CLASSES)))
 attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
 
 rare_class_name = trn_dataset.CLASSES[imbalanced_classes[0]]
-rare_test_file = './data/bdd100k/VOC2012/ImageSets/Main/' + 'rare_test.txt'
+rare_test_file = './data/bdd100k/VOC2012/ImageSets/Main/' + str(sys.argv[2])
 if(not(os.path.exists(rare_test_file))):
   rare_test_img_count = prepare_rare_test_file('data/det_val.json', attr_details, rare_test_file, rare_class_name)
   print("Test file for attribute imbalance created with ", rare_test_img_count, " images")
 
+custom_test_file = [
+          './data/bdd100k/VOC2012/ImageSets/Main/val.txt',
+          './data/bdd100k/VOC2012/ImageSets/Main/' + str(sys.argv[2])
+      ]
 #---------------------------------------------------------------------------#
 #---- Create Imbalanced Labelled set and Query set from training dataset ---#
 #---------------------------------------------------------------------------#
@@ -240,7 +245,7 @@ if(initialTraining):
   #----- train initial model -----#
   indicesFile = os.path.join(work_dir,"labelledIndices.txt")
 
-  train_command ='python {} {} --work-dir {} --indices {} --cfg-options'.format(train_script, config, work_dir, indicesFile)
+  train_command ='python {} {} --work-dir {} --indices {} --gpu-ids {} --cfg-options'.format(train_script, config, work_dir, indicesFile, gpu_id)
   train_command = train_command.split()
   train_command.append('data.val.ann_file="{}"'.format(custom_val_file))
   print(' '.join(train_command))
@@ -255,10 +260,12 @@ if(initialTraining):
       print(std_out, end="")
 
   #----- test initial model ------#
-  test_command ='python {} {} {} --work-dir {} --eval mAP'.format(test_script, config, first_round_checkpoint, work_dir)
-  print(test_command)
-
-  for std_out in execute(test_command.split()):
+  test_command ='python {} {} {} --work-dir {} --eval mAP --cfg-options'.format(test_script, config, first_round_checkpoint, work_dir)
+  test_command = test_command.split()
+  test_command.append('data.test.ann_file="{}"'.format(custom_test_file))
+  print(' '.join(test_command))
+  
+  for std_out in execute(test_command):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
@@ -271,7 +278,7 @@ if(initialTraining):
 #---------------------------------------------------------------------------#
 
 # set SMI parameters
-smi_function = sys.argv[1]
+smi_function = sys.argv[3]
 if(smi_function == "logdetmi"):
   optimizer = "NaiveGreedy"
 else:
@@ -345,13 +352,10 @@ for n in range(no_of_rounds-1):
   # extract features and compute kernel
   model.eval()
   print("Extracting features for the unlabeled dataset:")
-  if(smi_function=="fl1mi" or smi_function=="logdetmi" or smi_function=="fl2mi" or smi_function=="gcmi"):
-      proposal_budget = 100
-      unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_top_k_RoI_features(model, unlb_loader, proposal_budget, feature_type="fc")
-      # print("unlabelled_dataset_feat.shape: ", unlabelled_dataset_feat.shape)
-      # print("unlabelled indices: ", unlabelled_indices)
-  else:
-      unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
+  proposal_budget = 100
+  unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_top_k_RoI_features(model, unlb_loader, proposal_budget, feature_type="fc")
+  # print("unlabelled_dataset_feat.shape: ", unlabelled_dataset_feat.shape)
+  # print("unlabelled indices: ", unlabelled_indices)
   print("Extracting features for the query dataset:")
   query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
   #Free memory
@@ -410,12 +414,10 @@ for n in range(no_of_rounds-1):
   # print("unlabeled indices after setdiff: ", unlabelled_indices)
 
   # augment rare objects from selected data samples into query set
-  rare_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_details, img_attribute_dict)
-  #print(rare_indices, rare_counts)
-  rare_details = (attr_class, attr_property, attr_value, rare_counts)
-  augmented_query_indices, _ = create_custom_dataset_bdd(trn_dataset, rare_indices, 0, 0, imbalanced_classes, set([]), rare_details, img_attribute_dict)
-
-  query_indices = np.concatenate([query_indices, augmented_query_indices])
+  aug_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_details, img_attribute_dict)
+  #print(aug_indices, rare_counts)
+  
+  query_indices = np.concatenate([query_indices, aug_indices])
   print("Round ", str(n+2), " dataset statistics:- U: ", len(unlabelled_indices), " L: ", len(labelled_indices), " Q: " , len(query_indices))
 
   #print(len(unlabelled_indices),len(labelled_indices))
@@ -460,14 +462,16 @@ for n in range(no_of_rounds-1):
     print(std_out, end="")
 
   #----- test initial model ------#
-  test_command ='python {} {} {} --work-dir {} --eval mAP'.format(test_script, config, checkpoint, strat_dir)
-  print(test_command)
-
-  for std_out in execute(test_command.split()):
+  test_command ='python {} {} {} --work-dir {} --eval mAP --cfg-options'.format(test_script, config, checkpoint, strat_dir)
+  test_command = test_command.split()
+  test_command.append('data.test.ann_file="{}"'.format(custom_test_file))
+  print(' '.join(test_command))
+  
+  for std_out in execute(test_command):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
 
   # close log file at the end of each round
   test_log.close()
-    #--------------------------- End of current round -----------------------------#
+  #--------------------------- End of current round -----------------------------#
