@@ -376,6 +376,7 @@ for n in range(no_of_rounds-1):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
+  test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
   
   # prepare Validation file from labelled file
   custom_val_file = prepare_val_file(trn_dataset, labelled_indices, strat_dir=strat_dir)
