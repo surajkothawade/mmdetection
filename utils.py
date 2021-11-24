@@ -489,21 +489,25 @@ def compute_queryImage_kernel(query_dataset_feat, unlabeled_dataset_feat):
 #---------- Custom function for Image-Image kernel computation -------------#
 #---------------------------------------------------------------------------#
 
-def compute_imageImage_kernel(unlabeled_dataset_feat, batch_size=100):
+def compute_imageImage_kernel(unlabeled_dataset_feat, device="cpu", batch_size=100):
+    print("Computing image image kernel")
     image_image_sim = []
-    unlabeled_feat_norm = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension
-    #print(unlabeled_feat_norm.shape)
-    unlabeled_data_size = unlabeled_feat_norm.shape[0]
-    for i in range(math.ceil(unlabeled_data_size/batch_size)): #batch through the unlabeled dataset to compute the similarity matrix
+    unlabeled_dataset_feat = l2_normalize(unlabeled_dataset_feat) #l2-normalize the unlabeled feature vector along the feature dimension
+    unlabeled_dataset_feat = torch.Tensor(unlabeled_dataset_feat).to(device)
+    print("unlabeled_dataset_feat.shape: ", unlabeled_dataset_feat.shape, type(unlabeled_dataset_feat))
+    unlabeled_data_size = unlabeled_dataset_feat.shape[0]
+    for i,_ in enumerate(tqdm(range(math.ceil(unlabeled_data_size/batch_size)))): #batch through the unlabeled dataset to compute the similarity matrix
         start_ind = i*batch_size
         end_ind = start_ind + batch_size
         if(end_ind > unlabeled_data_size):
             end_ind = unlabeled_data_size
-        unlabeled_feat_batch = unlabeled_feat_norm[start_ind:end_ind,:,:]
-        dotp = np.tensordot(unlabeled_feat_batch, unlabeled_feat_norm, axes=([2],[2])) #compute the dot product along the feature dimension, i.e between every proposal in an unlabeled image with all proposals from all images in the unlabeled set
-        #print(dotp.shape)
-        max_match_unlabeledProposal_proposal = np.amax(dotp, axis=(1,3)) #find the proposal-proposal pair with highest similarity score for each image
-        #print(max_match_unlabeledProposal_proposal.shape)
+        unlabeled_feat_batch = unlabeled_dataset_feat[start_ind:end_ind,:,:]
+        if(device.startswith("cuda")):
+          dotp = torch.tensordot(unlabeled_feat_batch, unlabeled_dataset_feat, dims=([2],[2]))
+          max_match_unlabeledProposal_proposal = torch.amax(dotp, axis=(1,3)).cpu().numpy()
+        else:
+          dotp = np.tensordot(unlabeled_feat_batch, unlabeled_dataset_feat, axes=([2],[2])) #compute the dot product along the feature dimension, i.e between every proposal in an unlabeled image with all proposals from all images in the unlabeled set
+          max_match_unlabeledProposal_proposal = np.amax(dotp, axis=(1,3)) #find the proposal-proposal pair with highest similarity score for each image
         image_image_sim.append(max_match_unlabeledProposal_proposal)
     image_image_sim = np.vstack(tuple(image_image_sim))
     print(image_image_sim.shape)
@@ -806,3 +810,97 @@ def extract_global_descriptor(model, img_loader, no_of_imgs=None):
               img_features.append(img_feature)  # add feature to list
               img_indices.append(indices[j])    # add image index to list
   return img_features, img_indices
+
+#---------------------------------------------------------------------------#
+#-------- Define Least confidence Score function : Score each image --------#
+#-------- on the basis of class confidence and select the top images -------#
+#-------- with least confidence scores for the next round of training ------#
+#---------------------------------------------------------------------------#
+def get_confidence_scores(model, img_loader, no_of_imgs, imb_classes=None):
+
+  confidence_scores = torch.ones(no_of_imgs)
+  device = next(model.parameters()).device  # model device
+
+  if imb_classes is not None:
+    print('using imbalanced classes ', imb_classes)
+
+  for i, data_batch in enumerate(tqdm(img_loader)):     # for each batch
+            
+      # split the dataloader output into image_data and dataset indices
+      img_data, indices = data_batch[0], data_batch[1].numpy()
+      
+      imgs, img_metas = img_data['img'].data[0].to(device=device), img_data['img_metas'].data[0]
+      
+      # extract image features from backbone + FPN neck
+      with torch.no_grad():
+          features = model.extract_feat(imgs)
+      
+      # get batch proposals from RPN Head and extract class scores from RoI Head
+      batch_proposals = extract_proposal_features(model, features, img_metas)
+      batch_cls_scores = get_RoI_features(model, features, batch_proposals, only_cls_scores=True)
+      
+      # normalize class_scores for each image to range between (0,1) which indicates
+      # probability whether an object of that class has a bounding box centered there
+      batch_cls_scores = batch_cls_scores.softmax(-1)
+
+
+      # split class_entropies as per no. of proposals in each image within batch
+      num_proposals_per_img = tuple(len(p) for p in batch_proposals)
+      batch_cls_scores = batch_cls_scores.split(num_proposals_per_img, 0)
+
+      # for each image, take the min of class_entropies per proposal and aggregate over all proposals (average-min)
+      for j, img_cls_scores in enumerate(batch_cls_scores):
+        min_scores_per_proposal, _ = torch.min(img_cls_scores, dim=1) # take min of all class scores per proposal
+        final_score = torch.mean(min_scores_per_proposal,dim=0)       # average over all proposals (avg-min implement)
+        # store final confidence score for current image
+        confidence_scores[indices[j]] = final_score.item()
+  
+  return confidence_scores
+
+  
+#---------------------------------------------------------------------------#
+#------ Define Least Margin Score function : Score each image on the -------#
+#------ basis of difference in top-2 max class confidence and select -------#
+#------ the top images with least margin scores for next round training ----#
+#---------------------------------------------------------------------------#
+def get_margin_scores(model, img_loader, no_of_imgs, imb_classes=None):
+
+  margin_scores = torch.ones(no_of_imgs)
+  device = next(model.parameters()).device  # model device
+
+  if imb_classes is not None:
+    print('using imbalanced classes ', imb_classes)
+
+  for i, data_batch in enumerate(tqdm(img_loader)):     # for each batch
+            
+      # split the dataloader output into image_data and dataset indices
+      img_data, indices = data_batch[0], data_batch[1].numpy()
+      
+      imgs, img_metas = img_data['img'].data[0].to(device=device), img_data['img_metas'].data[0]
+      
+      # extract image features from backbone + FPN neck
+      with torch.no_grad():
+          features = model.extract_feat(imgs)
+      
+      # get batch proposals from RPN Head and extract class scores from RoI Head
+      batch_proposals = extract_proposal_features(model, features, img_metas)
+      batch_cls_scores = get_RoI_features(model, features, batch_proposals, only_cls_scores=True)
+      
+      # normalize class_scores for each image to range between (0,1) which indicates
+      # probability whether an object of that class has a bounding box centered there
+      batch_cls_scores = batch_cls_scores.softmax(-1)
+
+      # split class_entropies as per no. of proposals in each image within batch
+      num_proposals_per_img = tuple(len(p) for p in batch_proposals)
+      batch_cls_scores = batch_cls_scores.split(num_proposals_per_img, 0)
+
+      # for each image, take the max of class_entropies per proposal and aggregate over all proposals (average-max)
+      for j, img_cls_scores in enumerate(batch_cls_scores):
+        #print(img_cls_scores[0])
+        sorted_scores_per_proposal, _ = torch.sort(img_cls_scores, descending=True) # sort all class scores per proposal
+        sorted_scores_per_proposal = sorted_scores_per_proposal[:, 0] - sorted_scores_per_proposal[:, 1] # take diff of top 2 max scores per proposal
+        final_score = torch.mean(sorted_scores_per_proposal, dim=0)       # average over all proposals (avg-maxdiff implement)
+        # store final margin score for current image
+        margin_scores[indices[j]] = final_score.item()
+  
+  return margin_scores

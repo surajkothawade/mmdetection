@@ -48,11 +48,11 @@ from mmdet.datasets.pipelines import Compose
 #------------------ initialize training parameters -------------------------#
 #---------------------------------------------------------------------------#
 budget = 200    # set Active Learning Budget
-no_of_rounds=10 # No. of Rounds to run
+no_of_rounds= 8 # No. of Rounds to run
 max_epochs=150  # maximum no. of epochs to run during training
-seed = 42       # seed value to be used throughout training
+seed = 24       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
-run = 1         # run number
+run = 3         # run number
 eval_interval = max_epochs # eval after x epochs
 initialTraining = False
 #---------------------------------------------------------------------------#
@@ -93,7 +93,7 @@ gpu_id =  sys.argv[1]
 cfg = Config.fromfile(base_config) # load base config from the base file
 
 cfg_options={}                # edit/update required parms
-cfg_options['seed'] = 42
+cfg_options['seed'] = seed
 cfg_options['runner.max_epochs'] = max_epochs
 cfg_options['data.train.times'] = trn_times
 cfg_options['data.samples_per_gpu'] = samples_per_gpu
@@ -224,6 +224,7 @@ if(initialTraining):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
+  test_log.write("\nNo. of labelled images selected: "+ str(len(labelled_indices)) + '\n')
   test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
 
   #---------------------------------------------------------------------------#
@@ -267,7 +268,7 @@ if(initialTraining):
 #---------------------------------------------------------------------------#
 targeted_uncertainty_cls = None
 
-strat_dir = os.path.join(work_dir, "targetedEntropySamplingProduct", str(run))
+strat_dir = os.path.join(work_dir, "targetedEntropySampling", str(run))
     
 # create a subdirectory to store log files and data
 if(not(os.path.exists(strat_dir))):
@@ -314,6 +315,12 @@ for n in range(no_of_rounds-1):
               seed=cfg.seed,
               indices_file=cfg.indices_file)
   
+  # Use the trained model to calculate uncertainty score of each unlabelled image
+  uncertainty_scores = get_uncertainty_scores(model, unlb_loader, no_of_trn_samples, targeted_uncertainty_cls)
+  targeted_budget = budget * 5
+  targeted_indices = torch.argsort(uncertainty_scores,descending=True)[:targeted_budget].numpy()
+  np.savetxt(strat_dir + "/targetedIndices.txt", targeted_indices, fmt='%i')
+  
   cfg.indices_file = strat_dir + "/queryIndices.txt"
   query_loader = build_dataloader(
                 trn_dataset,
@@ -326,24 +333,34 @@ for n in range(no_of_rounds-1):
                 seed=cfg.seed,
                 indices_file=cfg.indices_file)
   
-  print("\n Uncertainty score calculation in progress...\n")  
+  cfg.indices_file = strat_dir + "/targetedIndices.txt"
+  target_loader= build_dataloader(
+                trn_dataset,
+                samples_per_gpu, #cfg.data.samples_per_gpu,
+                cfg.data.workers_per_gpu,
+                # cfg.gpus will be ignored if distributed
+                num_gpus,
+                dist=False,
+                # shuffle=False,
+                seed=cfg.seed,
+                indices_file=cfg.indices_file)
+  
+  print("\n Similarity score calculation in progress...\n")  
   model.eval()
   #------------- Compute uncertainty similarity scores with the query dataset --------------
   # extract features and compute kernel
   print("Extracting features for the query dataset:")
   query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
-  unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
-  query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
+  print("Extracting features for the unlabeled dataset:")
+  proposal_budget = 100
+  targeted_dataset_feat, targeted_indices = get_unlabelled_top_k_RoI_features(model, target_loader, proposal_budget, feature_type="fc")
+  query_image_sim = compute_queryImage_kernel(query_dataset_feat, targeted_dataset_feat) # all functions need the QxV kernel
   similarity_scores = np.amax(query_image_sim, axis=0)
+  print('similarity scores shape: ', similarity_scores.shape)
 
-  # Use the trained model to calculate uncertainty score of each unlabelled image
-  uncertainty_scores = get_uncertainty_scores(model, unlb_loader, no_of_trn_samples, targeted_uncertainty_cls)
-  uncertainty_scores = uncertainty_scores[unlabelled_indices] # get uncertainty scores of only the unlabelled data points
-
-  print("len(uncertainty_scores): ", len(uncertainty_scores), " len(similarity_scores): ", len(similarity_scores))
-  assert(len(uncertainty_scores) == len(similarity_scores))
-  uncertainty_similarity_scores = uncertainty_scores * similarity_scores # calcaulate a score for each image as per the indices ordering in unlabelled_indices
-  #Free memory
+  print("len(targeted_indices): ", len(targeted_indices), " len(similarity_scores): ", len(similarity_scores))
+  assert(len(targeted_indices) == len(similarity_scores))
+  # Free memory
   del model
   del unlb_loader
   del query_loader
@@ -352,18 +369,27 @@ for n in range(no_of_rounds-1):
 
   # select the next set of training images with highest entropy/uncertainty * similarity
   labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
-  unlabelled_indices = np.asarray(unlabelled_indices)
+  unlabelled_indices = np.loadtxt(strat_dir+"/unlabelledIndices.txt",dtype=int)
+  targeted_indices = np.asarray(targeted_indices)
   #print(len(unlabelled_indices),len(labelled_indices))
-  unlabeled_selected_indices = torch.argsort(torch.Tensor(uncertainty_similarity_scores),descending=True)[:budget].numpy() # the argsort is w.r.t the unlabelled indices only
-  selected_indices = unlabelled_indices[unlabeled_selected_indices] # get the indices w.r.t the training dataset
+  unlabeled_selected_indices = torch.argsort(torch.Tensor(similarity_scores),descending=True)[:budget].numpy() # the argsort is w.r.t the unlabelled indices only
+  selected_indices = targeted_indices[unlabeled_selected_indices] # get the indices w.r.t the training dataset
   labelled_indices = np.concatenate([labelled_indices, selected_indices])
   unlabelled_indices = np.setdiff1d(unlabelled_indices, selected_indices)
   np.random.shuffle(unlabelled_indices)
+
+  # augment rare objects from selected data samples into query set
+  aug_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_details, img_attribute_dict)
+  #print(aug_indices, rare_counts)
+  
+  query_indices = np.concatenate([query_indices, aug_indices])
+  print("Round ", str(n+2), " dataset statistics:- U: ", len(unlabelled_indices), " L: ", len(labelled_indices), " Q: " , len(query_indices))
 
   #print(len(unlabelled_indices),len(labelled_indices))
   # save the current list of labelled & unlabelled indices to separate textfiles
   np.savetxt(strat_dir + "/labelledIndices.txt", labelled_indices, fmt='%i')
   np.savetxt(strat_dir + "/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
+  np.savetxt(strat_dir + "/queryIndices.txt", query_indices, fmt='%i')
 
   rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
   print("No. of rare objects selected: ", no_of_rare_indices)
@@ -376,6 +402,7 @@ for n in range(no_of_rounds-1):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
+  test_log.write("\nNo. of labelled images selected: "+ str(len(labelled_indices)) + '\n')
   test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
   
   # prepare Validation file from labelled file

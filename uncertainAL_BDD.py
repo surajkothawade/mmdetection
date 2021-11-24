@@ -124,7 +124,7 @@ file_ptr.close()
 #---------------------------------------------------------------------------#
 split_cfg = {     
              "per_imbclass_train":90,  # Number of samples per rare class in the train dataset
-             "per_imbclass_val":20,    # Number of samples per rare class in the validation dataset
+             "per_imbclass_val":10,    # Number of samples per rare class in the validation dataset
              "per_imbclass_attr":10,   # Number of samples per rare class in the unlabeled dataset
              "per_class_train":100,    # Number of samples per unrare class in the train dataset
              "per_class_val":0,        # Number of samples per unrare class in the validation dataset
@@ -262,27 +262,22 @@ if(initialTraining):
   test_log.close()
   #------------------------ End of initial training --------------------------#
 
-#---------------------------------------------------------------------------#
-#-------------------------------- Run SMI Loop -----------------------------#
-#---------------------------------------------------------------------------#
 
-# set SMI parameters
-smi_function = sys.argv[3]
-if(smi_function == "logdetmi"):
-  optimizer = "NaiveGreedy"
+#---------------------------------------------------------------------------#
+#--------------------- Run Uncertainty Sampling Loop -----------------------#
+#---------------------------------------------------------------------------#
+if sys.argv[3] in ['leastConf', 'margin']:
+  uncertainty_function = sys.argv[3]
 else:
-  optimizer = "LazyGreedy"
-stopIfZeroGain = False
-stopIfNegativeGain = False
-verbose = False
+  uncertainty_function = 'entropy'  # default
 
-targeted_cls = imbalanced_classes
-strat_dir = os.path.join(work_dir, smi_function, str(run))
+targeted_uncertainty_cls = None
+strat_dir = os.path.join(work_dir, uncertainty_function + "Sampling", str(run))
     
 # create a subdirectory to store log files and data
 if(not(os.path.exists(strat_dir))):
     os.makedirs(strat_dir)
-
+    
 # copy labelled, unlabelled indices file from first round backup file. Only these indices are changed in AL rounds
 for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
   src_file = os.path.join(work_dir, file)
@@ -293,134 +288,64 @@ for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt")
 
 # set checkpoint and log file name
 last_epoch_checkpoint = strat_dir + '/epoch_' + str(max_epochs) + '.pth'
-test_log_file = os.path.join(strat_dir,"SMI_test_mAP.txt")
+test_log_file = os.path.join(strat_dir, uncertainty_function + "_test_mAP.txt")
 
-# load from labelled, unlabelled & query indices fies
-labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
-unlabelled_indices = np.loadtxt(strat_dir+"/unlabelledIndices.txt",dtype=int)
-query_indices = np.loadtxt(strat_dir+"/queryIndices.txt",dtype=int)
+# set the indices file name
+cfg.indices_file = strat_dir + "/unlabelledIndices.txt"
 
 #------------ start training for fixed no. of rounds --------------#
 for n in range(no_of_rounds-1):
   # open log file at the beginning of each round
   test_log = open(test_log_file, 'a')
-  print("\n","="*20," beginning of round ",n+2," ","="*20,"\n")
 
+  print("\n","="*20," beginning of round ",n+2," ","="*20,"\n")
+  
   # instantiate the trained model
   if n:
     model = init_detector(config, checkpoint, device='cuda:'+str(gpu_id))
   else:     # for second round, use first round model trained with random indices
     print("second round uses first round model trained with random indices...")
     model = init_detector(config, first_round_checkpoint, device='cuda:'+str(gpu_id))
-
-  # build data loader for unlabelled and query set
-  cfg.indices_file = strat_dir + "/unlabelledIndices.txt"
-  unlb_loader = build_dataloader(
-                trn_dataset,
-                samples_per_gpu, #cfg.data.samples_per_gpu,
-                cfg.data.workers_per_gpu,
-                # cfg.gpus will be ignored if distributed
-                num_gpus,
-                dist=False,
-                #shuffle=False,
-                seed=cfg.seed,
-                indices_file=cfg.indices_file)
-
-  cfg.indices_file = strat_dir + "/queryIndices.txt"
-  query_loader = build_dataloader(
-                trn_dataset,
-                samples_per_gpu, #cfg.data.samples_per_gpu,
-                cfg.data.workers_per_gpu,
-                # cfg.gpus will be ignored if distributed
-                num_gpus,
-                dist=False,
-                #shuffle=False,
-                seed=cfg.seed,
-                indices_file=cfg.indices_file)
-
-  # extract features and compute kernel
-  model.eval()
-  print("Extracting features for the unlabeled dataset:")
-  if(smi_function=="fl1mi" or smi_function=="logdetmi"):
-    proposal_budget = 15
-  else:
-    proposal_budget = 100
-  unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_top_k_RoI_features(model, unlb_loader, proposal_budget, feature_type="fc")
-  # print("unlabelled_dataset_feat.shape: ", unlabelled_dataset_feat.shape)
-  # print("unlabelled indices: ", unlabelled_indices)
-  print("Extracting features for the query dataset:")
-  query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
-  #Free memory
-  del model
-  del unlb_loader
-  del query_loader
-  gc.collect()
   
-  if(smi_function=="fl1mi" or smi_function=="logdetmi"): # only these smi functions require computing the VxV kernel
-      unlabelled_dataset_feat = unlabelled_dataset_feat.astype(np.float32)
-      image_image_sim = compute_imageImage_kernel(unlabelled_dataset_feat)
-      if(smi_function=="logdetmi"):
-        query_query_sim = compute_queryQuery_kernel(query_dataset_feat)
-  query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
-  del globals()['unlabelled_dataset_feat']
-  del globals()['query_dataset_feat']
-  gc.collect()
+  # build dataloader from training dataset and unlabelled indices
+  trn_loader = build_dataloader(
+              trn_dataset, #this is the full dataset
+              samples_per_gpu, #cfg.data.samples_per_gpu,
+              cfg.data.workers_per_gpu,
+              # cfg.gpus will be ignored if distributed
+              num_gpus,
+              dist=False,
+              #shuffle=False,
+              seed=cfg.seed,
+              indices_file=cfg.indices_file)
+  
+   
+  # Use the trained model to calculate uncertainty score of each unlabelled image
+  if uncertainty_function == 'leastConf':
+    print("\n Least confidence score calculation in progress...\n") 
+    confidence_scores = get_confidence_scores(model, trn_loader, no_of_trn_samples, targeted_uncertainty_cls)
+    selected_indices = torch.argsort(confidence_scores)[:budget].numpy()
+  elif uncertainty_function == 'margin':
+    print("\n Margin score calculation in progress...\n") 
+    margin_scores = get_margin_scores(model, trn_loader, no_of_trn_samples, targeted_uncertainty_cls)
+    selected_indices = torch.argsort(margin_scores)[:budget].numpy()
+  else:
+    print("\n Entropy score calculation in progress...\n") 
+    entropy_scores = get_uncertainty_scores(model, trn_loader, no_of_trn_samples, targeted_uncertainty_cls)
+    selected_indices = torch.argsort(entropy_scores,descending=True)[:budget].numpy()
+  #------------------ end of uncertainty score calculation ---------------------
 
-  # instantiate the submodular functions using the kernels
-  if(smi_function =="fl2mi"):
-      obj = submodlib.FacilityLocationVariantMutualInformationFunction(n=query_image_sim.shape[1],
-                                                            num_queries=query_image_sim.shape[0], 
-                                                            query_sijs=query_image_sim.T, 
-                                                            queryDiversityEta=1)
-  if(smi_function =='gcmi'):
-      obj = submodlib.GraphCutMutualInformationFunction(n=query_image_sim.shape[1],
-                                                            num_queries=query_image_sim.shape[0], 
-                                                            query_sijs=query_image_sim.T)
-
-  if(smi_function =='fl1mi'):
-      obj = submodlib.FacilityLocationMutualInformationFunction(n=query_image_sim.shape[1],
-                                                                    num_queries=query_image_sim.shape[0], 
-                                                                    data_sijs=image_image_sim, 
-                                                                    query_sijs=query_image_sim.T, 
-                                                                    magnificationEta=1)
-
-  if(smi_function =='logdetmi'):
-      obj = submodlib.LogDeterminantMutualInformationFunction(n=query_image_sim.shape[1],
-                                                                  num_queries=query_image_sim.shape[0],
-                                                                  data_sijs=image_image_sim,  
-                                                                  query_sijs=query_image_sim.T,
-                                                                  query_query_sijs=query_query_sim,
-                                                                  magnificationEta=1,
-                                                                  lambdaVal=1)
-
-  greedyList = obj.maximize(budget=budget,optimizer=optimizer, stopIfZeroGain=stopIfZeroGain, 
-                            stopIfNegativeGain=stopIfNegativeGain, verbose=verbose)
-  # print("greedyList: ", greedyList)
-  greedyIndices = [x[0] for x in greedyList]
-  greedyIndices = np.array(greedyIndices)
-  # print("greedyIndices: ", greedyIndices)
-  # print("size of greedy set: ", len(greedyIndices))
-  selected_indices = np.array(unlabelled_indices)[greedyIndices]
-  # print("selected_indices: ", selected_indices)
-
+  # select the next set of training images with highest entropy/uncertainty
+  labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
+  unlabelled_indices = np.loadtxt(strat_dir+"/unlabelledIndices.txt",dtype=int)
+  #print(len(unlabelled_indices),len(labelled_indices))
   labelled_indices = np.concatenate([labelled_indices, selected_indices])
   unlabelled_indices = np.setdiff1d(unlabelled_indices, selected_indices)
   np.random.shuffle(unlabelled_indices)
-  # print("labeled indices: ", labelled_indices)
-  # print("unlabeled indices after setdiff: ", unlabelled_indices)
-
-  # augment rare objects from selected data samples into query set
-  aug_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_details, img_attribute_dict)
-  #print(aug_indices, rare_counts)
-  
-  query_indices = np.concatenate([query_indices, aug_indices])
-  print("Round ", str(n+2), " dataset statistics:- U: ", len(unlabelled_indices), " L: ", len(labelled_indices), " Q: " , len(query_indices))
-
   #print(len(unlabelled_indices),len(labelled_indices))
   # save the current list of labelled & unlabelled indices to separate textfiles
-  np.savetxt(strat_dir+"/labelledIndices.txt", labelled_indices, fmt='%i')
-  np.savetxt(strat_dir+"/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
-  np.savetxt(strat_dir+"/queryIndices.txt", query_indices, fmt='%i')
+  np.savetxt(strat_dir + "/labelledIndices.txt", labelled_indices, fmt='%i')
+  np.savetxt(strat_dir + "/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
 
   rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
   print("No. of rare objects selected: ", no_of_rare_indices)
@@ -435,8 +360,7 @@ for n in range(no_of_rounds-1):
     test_log.write(line + '\n')
   test_log.write("\nNo. of labelled images selected: "+ str(len(labelled_indices)) + '\n')
   test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
-
-
+  
   # prepare Validation file from labelled file
   custom_val_file = prepare_val_file(trn_dataset, labelled_indices, strat_dir=strat_dir)
 

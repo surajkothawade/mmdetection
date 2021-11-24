@@ -50,9 +50,9 @@ from mmdet.datasets.pipelines import Compose
 budget = 200    # set Active Learning Budget
 no_of_rounds= 8 # No. of Rounds to run
 max_epochs=150  # maximum no. of epochs to run during training
-seed = 24       # seed value to be used throughout training
+seed = 42       # seed value to be used throughout training
 trn_times = 1   # default is 10 for PascalVOC
-run = 3         # run number
+run = 1         # run number
 eval_interval = max_epochs # eval after x epochs
 initialTraining = False
 #---------------------------------------------------------------------------#
@@ -67,8 +67,8 @@ proposals_per_img = 300     # maximum proposals to be generated per image
 #---------------- Work_dir, Checkpoint & Config file settings --------------#
 #---------------------------------------------------------------------------#
 root = './'
-config = './faster_rcnn_r50_fpn_AL_bdd100k_cycle.py'
-base_config = './configs/bdd100k/faster_rcnn_r50_fpn_1x_bdd100k_vocfmt.py'
+config = './faster_rcnn_r50_fpn_AL_voc0712.py'
+base_config = './configs/pascal_voc/faster_rcnn_r50_fpn_1x_voc0712.py'
 work_dir = './work_dirs/' + config.split('/')[-1].split('.')[0]
 train_script = root + 'tools/train.py'
 test_script = root + 'tools/test.py'
@@ -123,26 +123,16 @@ file_ptr.close()
 #------------------ Class Imbalance specific setting -----------------------#
 #---------------------------------------------------------------------------#
 split_cfg = {     
-             "per_imbclass_train":90,  # Number of samples per rare class in the train dataset
-             "per_imbclass_val":20,    # Number of samples per rare class in the validation dataset
-             "per_imbclass_attr":10,   # Number of samples per rare class in the unlabeled dataset
+             "per_imbclass_train":10,  # Number of samples per rare class in the train dataset
+             "per_imbclass_val":5,     # Number of samples per rare class in the validation dataset
+             "per_imbclass_lake":50,   # Number of samples per rare class in the unlabeled dataset
              "per_class_train":100,    # Number of samples per unrare class in the train dataset
              "per_class_val":0,        # Number of samples per unrare class in the validation dataset
-             "per_class_lake":50}      # Number of samples per unrare class in the unlabeled dataset
+             "per_class_lake":500}     # Number of samples per unrare class in the unlabeled dataset
 
 #------------- select imbalanced classes -------------#
-imbalanced_classes = [7]     # label of bicycle class 
+imbalanced_classes = [3, 4]     # label of boat & bottle class 
 
-#---------- select attribute for imbalancing ---------#
-attr_class = imbalanced_classes[0]
-attr_property = 'timeofday'
-attr_value = 'night'
-attr_budget = split_cfg['per_imbclass_attr']
-attr_details = (attr_class, attr_property, attr_value, attr_budget)
-
-# query class settings
-query_budget = split_cfg['per_imbclass_val']
-query_details = (attr_class, attr_property, attr_value, query_budget)
 
 #---------------------------------------------------------------------------#
 #------------------------- Build training dataset --------------------------#
@@ -156,26 +146,12 @@ print('No of training samples and budget: ', no_of_trn_samples, budget)
 
 all_classes = set(range(len(trn_dataset.CLASSES)))
 
-# get image wise attribute mapping
-attribute_dict, img_attribute_dict = get_image_wise_attributes('data/det_train.json')
-
-rare_class_name = trn_dataset.CLASSES[imbalanced_classes[0]]
-rare_test_file = './data/bdd100k/VOC2012/ImageSets/Main/' + str(sys.argv[2])
-if(not(os.path.exists(rare_test_file))):
-  rare_test_img_count = prepare_rare_test_file('data/det_val.json', attr_details, rare_test_file, rare_class_name)
-  print("Test file for attribute imbalance created with ", rare_test_img_count, " images")
-
-custom_test_file = [
-          './data/bdd100k/VOC2012/ImageSets/Main/val.txt',
-          './data/bdd100k/VOC2012/ImageSets/Main/' + str(sys.argv[2])
-      ]
 #---------------------------------------------------------------------------#
 #---- Create Imbalanced Labelled set and Query set from training dataset ---#
 #---------------------------------------------------------------------------#
 
 # set the seed to retain order from random selection
 np.random.seed(seed)
-
 if(initialTraining):
   # initialize array to contain selected indices from all rounds
   labelled_indices = np.array([])
@@ -183,22 +159,15 @@ if(initialTraining):
   # create a random permutation of all training indices
   unlabelled_indices = np.random.permutation(no_of_trn_samples)
 
-  all_class_set = set(range(len(trn_dataset.CLASSES)))
-  
   print("#", '-'*15, ' Labelled Dataset Statistics ', '-'*15, "#\n")
   # call custom function to create imbalance & select labelled dataset as per rare & unrare budget
-  labelled_indices, unlabelled_indices = create_custom_dataset_bdd(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_train'], split_cfg['per_class_train'], imbalanced_classes, all_class_set, attr_details, img_attribute_dict)
-  
+  labelled_indices, unlabelled_indices = create_custom_dataset(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_train'], split_cfg['per_class_train'], imbalanced_classes, all_classes)
   np.random.shuffle(unlabelled_indices)
   print('\n', len(labelled_indices), " labelled images selected!\n")
 
-  rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
-  print("No. of rare objects selected: ", no_of_rare_indices)
-
   print("#", '-'*15, ' Query Dataset Statistics ', '-'*15, "#\n")
-  
   # call custom function to select query dataset
-  query_indices, unlabelled_indices = create_custom_dataset_bdd(trn_dataset, unlabelled_indices, split_cfg['per_class_val'], split_cfg['per_class_val'], imbalanced_classes, set([]), query_details, img_attribute_dict)
+  query_indices, unlabelled_indices = create_custom_dataset(trn_dataset, unlabelled_indices, split_cfg['per_imbclass_val'], split_cfg['per_class_val'], imbalanced_classes, set(imbalanced_classes))
   
   np.random.shuffle(unlabelled_indices)
   print('\n', len(query_indices), " query images selected!")
@@ -206,7 +175,6 @@ if(initialTraining):
 
   # prepare Validation file from labelled file
   custom_val_file = prepare_val_file(trn_dataset, labelled_indices)
-  print(custom_val_file)
 
   # set log file
   test_log = open(os.path.join(work_dir,"Round_1_test_mAP.txt"), 'w')
@@ -224,8 +192,6 @@ if(initialTraining):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
-  test_log.write("\nNo. of labelled images selected: "+ str(len(labelled_indices)) + '\n')
-  test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
 
   #---------------------------------------------------------------------------#
   #----------------------- Call First Round Training -------------------------#
@@ -234,12 +200,10 @@ if(initialTraining):
   #----- train initial model -----#
   indicesFile = os.path.join(work_dir,"labelledIndices.txt")
 
-  train_command ='python {} {} --work-dir {} --indices {} --gpu-ids {} --cfg-options'.format(train_script, config, work_dir, indicesFile, gpu_id)
-  train_command = train_command.split()
-  train_command.append('data.val.ann_file="{}"'.format(custom_val_file))
-  print(' '.join(train_command))
+  train_command ='python {} {} --indices {}'.format(train_script, config, indicesFile)
+  print(train_command)
 
-  for std_out in execute(train_command):
+  for std_out in execute(train_command.split()):
     if std_out[0] != '[':
       print(std_out, end="")
 
@@ -249,12 +213,10 @@ if(initialTraining):
       print(std_out, end="")
 
   #----- test initial model ------#
-  test_command ='python {} {} {} --work-dir {} --eval mAP --cfg-options'.format(test_script, config, first_round_checkpoint, work_dir)
-  test_command = test_command.split()
-  test_command.append('data.test.ann_file="{}"'.format(custom_test_file))
-  print(' '.join(test_command))
-  
-  for std_out in execute(test_command):
+  test_command ='python {} {} {} --work-dir {} --eval mAP'.format(test_script, config, first_round_checkpoint, work_dir)
+  print(test_command)
+
+  for std_out in execute(test_command.split()):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
@@ -262,27 +224,20 @@ if(initialTraining):
   test_log.close()
   #------------------------ End of initial training --------------------------#
 
+
 #---------------------------------------------------------------------------#
-#-------------------------------- Run SMI Loop -----------------------------#
+#----------------------- Run Entropy Sampling Loop -------------------------#
 #---------------------------------------------------------------------------#
 
-# set SMI parameters
-smi_function = sys.argv[3]
-if(smi_function == "logdetmi"):
-  optimizer = "NaiveGreedy"
-else:
-  optimizer = "LazyGreedy"
-stopIfZeroGain = False
-stopIfNegativeGain = False
-verbose = False
+# targeted_uncertainty_cls = imbalanced_classes #The old uncertainty based implementation
+targeted_uncertainty_cls = None
 
-targeted_cls = imbalanced_classes
-strat_dir = os.path.join(work_dir, smi_function, str(run))
+strat_dir = os.path.join(work_dir, "targetedEntropySamplingProduct", str(run))
     
 # create a subdirectory to store log files and data
 if(not(os.path.exists(strat_dir))):
     os.makedirs(strat_dir)
-
+    
 # copy labelled, unlabelled indices file from first round backup file. Only these indices are changed in AL rounds
 for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt"):
   src_file = os.path.join(work_dir, file)
@@ -293,39 +248,37 @@ for file in ("labelledIndices.txt", "unlabelledIndices.txt", "queryIndices.txt")
 
 # set checkpoint and log file name
 last_epoch_checkpoint = strat_dir + '/epoch_' + str(max_epochs) + '.pth'
-test_log_file = os.path.join(strat_dir,"SMI_test_mAP.txt")
 
-# load from labelled, unlabelled & query indices fies
-labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
-unlabelled_indices = np.loadtxt(strat_dir+"/unlabelledIndices.txt",dtype=int)
-query_indices = np.loadtxt(strat_dir+"/queryIndices.txt",dtype=int)
+test_log_file = os.path.join(strat_dir,"Targeted_Entropy_test_mAP.txt")
 
 #------------ start training for fixed no. of rounds --------------#
 for n in range(no_of_rounds-1):
   # open log file at the beginning of each round
   test_log = open(test_log_file, 'a')
-  print("\n","="*20," beginning of round ",n+2," ","="*20,"\n")
 
+  print("\n","="*20," beginning of round ",n+2," ","="*20,"\n")
+  
   # instantiate the trained model
   if n:
     model = init_detector(config, checkpoint, device='cuda:'+str(gpu_id))
   else:     # for second round, use first round model trained with random indices
     print("second round uses first round model trained with random indices...")
     model = init_detector(config, first_round_checkpoint, device='cuda:'+str(gpu_id))
-
-  # build data loader for unlabelled and query set
+  
+  # set the indices file name
   cfg.indices_file = strat_dir + "/unlabelledIndices.txt"
+  # build dataloader from training dataset and unlabelled indices
   unlb_loader = build_dataloader(
-                trn_dataset,
-                samples_per_gpu, #cfg.data.samples_per_gpu,
-                cfg.data.workers_per_gpu,
-                # cfg.gpus will be ignored if distributed
-                num_gpus,
-                dist=False,
-                #shuffle=False,
-                seed=cfg.seed,
-                indices_file=cfg.indices_file)
-
+              trn_dataset, #this is the full dataset
+              samples_per_gpu, #cfg.data.samples_per_gpu,
+              cfg.data.workers_per_gpu,
+              # cfg.gpus will be ignored if distributed
+              num_gpus,
+              dist=False,
+              # shuffle=False,
+              seed=cfg.seed,
+              indices_file=cfg.indices_file)
+  
   cfg.indices_file = strat_dir + "/queryIndices.txt"
   query_loader = build_dataloader(
                 trn_dataset,
@@ -334,96 +287,48 @@ for n in range(no_of_rounds-1):
                 # cfg.gpus will be ignored if distributed
                 num_gpus,
                 dist=False,
-                #shuffle=False,
+                # shuffle=False,
                 seed=cfg.seed,
                 indices_file=cfg.indices_file)
-
-  # extract features and compute kernel
+  
+  print("\n Uncertainty score calculation in progress...\n")  
   model.eval()
-  print("Extracting features for the unlabeled dataset:")
-  if(smi_function=="fl1mi" or smi_function=="logdetmi"):
-    proposal_budget = 15
-  else:
-    proposal_budget = 100
-  unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_top_k_RoI_features(model, unlb_loader, proposal_budget, feature_type="fc")
-  # print("unlabelled_dataset_feat.shape: ", unlabelled_dataset_feat.shape)
-  # print("unlabelled indices: ", unlabelled_indices)
+  #------------- Compute uncertainty similarity scores with the query dataset --------------
+  # extract features and compute kernel
   print("Extracting features for the query dataset:")
   query_dataset_feat, query_indices = get_query_RoI_features(model, query_loader, imbalanced_classes, feature_type="fc")
+  unlabelled_dataset_feat, unlabelled_indices = get_unlabelled_RoI_features(model, unlb_loader, feature_type="fc")
+  query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
+  similarity_scores = np.amax(query_image_sim, axis=0)
+
+  # Use the trained model to calculate uncertainty score of each unlabelled image
+  uncertainty_scores = get_uncertainty_scores(model, unlb_loader, no_of_trn_samples, targeted_uncertainty_cls)
+  uncertainty_scores = uncertainty_scores[unlabelled_indices] # get uncertainty scores of only the unlabelled data points
+
+  print("len(uncertainty_scores): ", len(uncertainty_scores), " len(similarity_scores): ", len(similarity_scores))
+  assert(len(uncertainty_scores) == len(similarity_scores))
+  uncertainty_similarity_scores = uncertainty_scores * similarity_scores # calcaulate a score for each image as per the indices ordering in unlabelled_indices
   #Free memory
   del model
   del unlb_loader
   del query_loader
   gc.collect()
-  
-  if(smi_function=="fl1mi" or smi_function=="logdetmi"): # only these smi functions require computing the VxV kernel
-      unlabelled_dataset_feat = unlabelled_dataset_feat.astype(np.float32)
-      image_image_sim = compute_imageImage_kernel(unlabelled_dataset_feat)
-      if(smi_function=="logdetmi"):
-        query_query_sim = compute_queryQuery_kernel(query_dataset_feat)
-  query_image_sim = compute_queryImage_kernel(query_dataset_feat, unlabelled_dataset_feat) # all functions need the QxV kernel
-  del globals()['unlabelled_dataset_feat']
-  del globals()['query_dataset_feat']
-  gc.collect()
+  #------------------ end of uncertainty similarity score calculation ---------------------
 
-  # instantiate the submodular functions using the kernels
-  if(smi_function =="fl2mi"):
-      obj = submodlib.FacilityLocationVariantMutualInformationFunction(n=query_image_sim.shape[1],
-                                                            num_queries=query_image_sim.shape[0], 
-                                                            query_sijs=query_image_sim.T, 
-                                                            queryDiversityEta=1)
-  if(smi_function =='gcmi'):
-      obj = submodlib.GraphCutMutualInformationFunction(n=query_image_sim.shape[1],
-                                                            num_queries=query_image_sim.shape[0], 
-                                                            query_sijs=query_image_sim.T)
-
-  if(smi_function =='fl1mi'):
-      obj = submodlib.FacilityLocationMutualInformationFunction(n=query_image_sim.shape[1],
-                                                                    num_queries=query_image_sim.shape[0], 
-                                                                    data_sijs=image_image_sim, 
-                                                                    query_sijs=query_image_sim.T, 
-                                                                    magnificationEta=1)
-
-  if(smi_function =='logdetmi'):
-      obj = submodlib.LogDeterminantMutualInformationFunction(n=query_image_sim.shape[1],
-                                                                  num_queries=query_image_sim.shape[0],
-                                                                  data_sijs=image_image_sim,  
-                                                                  query_sijs=query_image_sim.T,
-                                                                  query_query_sijs=query_query_sim,
-                                                                  magnificationEta=1,
-                                                                  lambdaVal=1)
-
-  greedyList = obj.maximize(budget=budget,optimizer=optimizer, stopIfZeroGain=stopIfZeroGain, 
-                            stopIfNegativeGain=stopIfNegativeGain, verbose=verbose)
-  # print("greedyList: ", greedyList)
-  greedyIndices = [x[0] for x in greedyList]
-  greedyIndices = np.array(greedyIndices)
-  # print("greedyIndices: ", greedyIndices)
-  # print("size of greedy set: ", len(greedyIndices))
-  selected_indices = np.array(unlabelled_indices)[greedyIndices]
-  # print("selected_indices: ", selected_indices)
-
+  # select the next set of training images with highest entropy/uncertainty * similarity
+  labelled_indices = np.loadtxt(strat_dir+"/labelledIndices.txt",dtype=int)
+  unlabelled_indices = np.asarray(unlabelled_indices)
+  #print(len(unlabelled_indices),len(labelled_indices))
+  unlabeled_selected_indices = torch.argsort(torch.Tensor(uncertainty_similarity_scores),descending=True)[:budget].numpy() # the argsort is w.r.t the unlabelled indices only
+  selected_indices = unlabelled_indices[unlabeled_selected_indices] # get the indices w.r.t the training dataset
   labelled_indices = np.concatenate([labelled_indices, selected_indices])
   unlabelled_indices = np.setdiff1d(unlabelled_indices, selected_indices)
   np.random.shuffle(unlabelled_indices)
-  # print("labeled indices: ", labelled_indices)
-  # print("unlabeled indices after setdiff: ", unlabelled_indices)
-
-  # augment rare objects from selected data samples into query set
-  aug_indices, rare_counts = get_rare_attribute_statistics(trn_dataset, selected_indices, attr_details, img_attribute_dict)
-  #print(aug_indices, rare_counts)
-  
-  query_indices = np.concatenate([query_indices, aug_indices])
-  print("Round ", str(n+2), " dataset statistics:- U: ", len(unlabelled_indices), " L: ", len(labelled_indices), " Q: " , len(query_indices))
 
   #print(len(unlabelled_indices),len(labelled_indices))
   # save the current list of labelled & unlabelled indices to separate textfiles
-  np.savetxt(strat_dir+"/labelledIndices.txt", labelled_indices, fmt='%i')
-  np.savetxt(strat_dir+"/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
-  np.savetxt(strat_dir+"/queryIndices.txt", query_indices, fmt='%i')
-
-  rare_indices, no_of_rare_indices = get_rare_attribute_statistics(trn_dataset, labelled_indices, attr_details, img_attribute_dict)  
-  print("No. of rare objects selected: ", no_of_rare_indices)
+  np.savetxt(strat_dir + "/labelledIndices.txt", labelled_indices, fmt='%i')
+  np.savetxt(strat_dir + "/unlabelledIndices.txt", unlabelled_indices, fmt='%i')
 
   # print current selection stats
   labelled_stats = get_class_statistics(trn_dataset, labelled_indices)
@@ -433,10 +338,7 @@ for n in range(no_of_rounds-1):
   for key, val in labelled_stats.items():
     line = '| ' + trn_dataset.CLASSES[key].ljust(15) + str(len(val)).ljust(15) + str(len(set(val)))
     test_log.write(line + '\n')
-  test_log.write("\nNo. of labelled images selected: "+ str(len(labelled_indices)) + '\n')
-  test_log.write("\nNo. of rare objects selected: "+ str(no_of_rare_indices) + '\n')
-
-
+  
   # prepare Validation file from labelled file
   custom_val_file = prepare_val_file(trn_dataset, labelled_indices, strat_dir=strat_dir)
 
@@ -459,16 +361,14 @@ for n in range(no_of_rounds-1):
     print(std_out, end="")
 
   #----- test initial model ------#
-  test_command ='python {} {} {} --work-dir {} --eval mAP --cfg-options'.format(test_script, config, checkpoint, strat_dir)
-  test_command = test_command.split()
-  test_command.append('data.test.ann_file="{}"'.format(custom_test_file))
-  print(' '.join(test_command))
-  
-  for std_out in execute(test_command):
+  test_command ='python {} {} {} --work-dir {} --eval mAP'.format(test_script, config, checkpoint, strat_dir)
+  print(test_command)
+
+  for std_out in execute(test_command.split()):
     if std_out[0] != '[':
       print(std_out, end="")
       test_log.write(std_out)
-
+  
   # close log file at the end of each round
   test_log.close()
   #--------------------------- End of current round -----------------------------#
